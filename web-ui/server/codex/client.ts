@@ -15,10 +15,22 @@ export class CodexClient extends EventEmitter {
 
   async start() {
     this.status = "starting";
-    this.child = spawn("codex", ["app-server", "--stdio"], { cwd: this.cwd, env: process.env });
+    const command = process.platform === "win32"
+      ? (process.env.ComSpec || process.env.COMSPEC || "cmd.exe")
+      : "codex";
+    const args = process.platform === "win32"
+      ? ["/d", "/s", "/c", "codex", "app-server", "--stdio"]
+      : ["app-server", "--stdio"];
+    this.child = spawn(command, args, { cwd: this.cwd, env: process.env });
     const lines = readline.createInterface({ input: this.child.stdout });
     lines.on("line", (line) => { try { this.handle(JSON.parse(line)); } catch { this.emit("warning", `Malformed app-server message: ${line.slice(0, 100)}`); } });
     this.child.stderr.on("data", (chunk) => this.emit("stderr", chunk.toString()));
+    this.child.on("error", (error) => {
+      this.status = "error";
+      for (const pending of this.pending.values()) pending.reject(error);
+      this.pending.clear();
+      this.emit("status", this.status);
+    });
     this.child.on("exit", (code) => {
       this.status = code === 0 ? "stopped" : "error";
       for (const pending of this.pending.values()) pending.reject(new Error(`Codex exited (${code})`));
