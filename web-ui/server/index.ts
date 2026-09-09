@@ -1,5 +1,6 @@
 import http from "node:http";
 import crypto from "node:crypto";
+import { createReadStream } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,12 +8,15 @@ import { WebSocketServer } from "ws";
 import { config, route } from "./config.js";
 import { WorkspaceFs } from "./filesystem.js";
 import { CodexClient } from "./codex/client.js";
+import { AttachmentStore } from "./attachments.js";
 import { wireSockets } from "./websocket.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, "..");
 const workspaceFs = new WorkspaceFs(config.workspace, config.workspaceBase, config.workspaceExplicit);
 await workspaceFs.init();
+const attachmentStore = new AttachmentStore();
+await attachmentStore.init();
 const codex = new CodexClient(workspaceFs.path);
 const vite = config.dev ? await (await import("vite")).createServer({ root, server: { middlewareMode: true }, appType: "spa" }) : null;
 const mime: Record<string, string> = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon", ".json": "application/json" };
@@ -34,6 +38,17 @@ const server = http.createServer(async (req, res) => {
   if (prefix && url.pathname === prefix) { res.writeHead(308, { Location: `${prefix}/${url.search}` }); return res.end(); }
   if (prefix && !url.pathname.startsWith(`${prefix}/`)) { res.writeHead(404); return res.end("Not found"); }
   const localPath = url.pathname.slice(prefix.length) || "/";
+  const attachmentMatch = localPath.match(/^\/attachments\/([^/]+)\/([^/]+)\/([^/]+)$/);
+  if (attachmentMatch) {
+    let parts: string[];
+    try { parts = attachmentMatch.slice(1).map((part) => decodeURIComponent(part)); } catch { res.writeHead(404); return res.end("Not found"); }
+    let download;
+    try { download = await attachmentStore.resolveDownload(parts[0], parts[1], parts[2]); } catch { download = null; }
+    if (!download) { res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" }); return res.end("Not found"); }
+    res.writeHead(200, { "Content-Type": download.mime, "Content-Length": download.size, "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(download.name)}`, "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff" });
+    createReadStream(download.path).on("error", () => { if (!res.headersSent) res.writeHead(404); res.end(); }).pipe(res);
+    return;
+  }
   if (vite) {
     req.url = `${localPath}${url.search}`;
     return vite.middlewares(req, res, () => { res.writeHead(404); res.end(); });
@@ -60,7 +75,7 @@ server.on("upgrade", (req, socket, head) => {
   if (pathname !== route("/ws")) return socket.destroy();
   wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
 });
-wireSockets(wss, codex, workspaceFs, () => ({ workspace: workspaceFs.path, workspaceBase: workspaceFs.basePath, workspaceSelected: workspaceFs.isSelected, basePath: config.basePath, codexVersion: codex.userAgent }));
+wireSockets(wss, codex, workspaceFs, attachmentStore, () => ({ workspace: workspaceFs.path, workspaceBase: workspaceFs.basePath, workspaceSelected: workspaceFs.isSelected, basePath: config.basePath, codexVersion: codex.userAgent }));
 server.listen(config.port, config.host, async () => {
   console.log(`Codex Web: http://${config.host}:${config.port}${route()}`);
   console.log(`Workspace: ${workspaceFs.path}`);

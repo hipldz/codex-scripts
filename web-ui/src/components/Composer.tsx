@@ -34,7 +34,7 @@ export function Composer({ running, disabled, send, stop, models, model, effort,
       const image = file.type.startsWith("image/"); const textFile = textTypes.has(file.type) || /\.(txt|md|json|ya?ml|xml|csv|tsx?|jsx?|py|rs|go|java|c|cc|cpp|h|hpp|css|html|sh|toml)$/i.test(file.name);
       if (!image && !textFile) { setAttachmentError(`Unsupported attachment: ${file.name}`); continue; }
       if (file.size > (image ? 10 : 1) * 1024 * 1024) { setAttachmentError(`${file.name} is too large`); continue; }
-      next.push({ id: `${Date.now()}-${file.name}-${next.length}`, name: file.name, mime: file.type || "text/plain", kind: image ? "image" : "text", data: image ? await asDataUrl(file) : await file.text(), size: file.size });
+      next.push({ id: crypto.randomUUID(), name: file.name, mime: file.type || (image ? "image/png" : "text/plain"), kind: image ? "image" : "text", data: await asDataUrl(file), size: file.size });
     }
     setAttachments((old) => [...old, ...next].slice(0, 4)); if (input.current) input.current.value = "";
   };

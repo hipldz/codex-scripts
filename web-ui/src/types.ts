@@ -1,4 +1,4 @@
-export type UserAttachment = { name: string; kind: "image" | "audio" | "text"; data?: string };
+export type UserAttachment = { id?: string; name: string; mime?: string; kind: "image" | "audio" | "text"; data?: string; size?: number };
 export type ApprovalDecision = string | Record<string, unknown>;
 export type UiItem =
   | { type: "user_message"; id: string; text: string; attachments?: UserAttachment[] }

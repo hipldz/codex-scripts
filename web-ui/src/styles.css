@@ -236,7 +236,10 @@ svg { display: block; }
 .user-attachment-image { max-width: 260px; height: 150px; flex: none; border-radius: 11px; object-fit: cover; background: var(--soft); }
 .user-attachment-file { min-width: 150px; height: 42px; display: flex; align-items: center; gap: 7px; padding: 0 9px; border: 1px solid var(--line); border-radius: 9px; background: rgba(255,255,255,.58); }
 .user-attachment-file svg { width: 14px; height: 14px; }
-.user-attachment-file span { overflow: hidden; font-size: 8.5px; white-space: nowrap; text-overflow: ellipsis; }
+.user-attachment-file span { min-width: 0; flex: 1; overflow: hidden; font-size: 8.5px; white-space: nowrap; text-overflow: ellipsis; }
+.user-attachment-download { width: 22px; height: 22px; display: grid; flex: none; place-items: center; border-radius: 6px; color: var(--muted); }
+.user-attachment-download:hover { background: var(--soft-hover); color: var(--ink); }
+.user-attachment-download svg { width: 13px; height: 13px; }
 .message.assistant { display: grid; grid-template-columns: 25px minmax(0, 1fr); align-items: start; gap: 12px; padding-right: 48px; }
 .codex-avatar { width: 24px; height: 24px; display: grid; place-items: center; margin-top: 1px; }
 .codex-avatar .codex-logo { width: 21px; height: 21px; }

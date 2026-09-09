@@ -1,7 +1,9 @@
 import type { WebSocketServer, WebSocket } from "ws";
+import crypto from "node:crypto";
 import nodeFs from "node:fs/promises";
 import v8 from "node:v8";
 import { adapt, approval } from "./codex/event-adapter.js";
+import { AttachmentStore, type AttachmentSummary, type IncomingAttachment } from "./attachments.js";
 import type { CodexClient } from "./codex/client.js";
 import type { WorkspaceFs } from "./filesystem.js";
 
@@ -21,9 +23,27 @@ const turnPermissionSettings = (permission: unknown, cwd: string) => {
     default: return { approvalPolicy: "on-request", sandboxPolicy: { type: "workspaceWrite", writableRoots: [cwd], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false } };
   }
 };
-const userMessage = (content: any[]) => ({
-  text: content.filter((item: any) => item.type === "text").map((item: any) => item.text).join("\n"),
-  attachments: content.filter((item: any) => ["image", "localImage", "audio", "localAudio"].includes(item.type)).map((item: any, index: number) => ({ name: item.path?.split("/").pop() || `${item.type.startsWith("audio") || item.type === "localAudio" ? "Audio" : "Image"} ${index + 1}`, kind: item.type.startsWith("audio") || item.type === "localAudio" ? "audio" : "image", data: item.url?.startsWith("data:") ? item.url : undefined })),
+const legacyAttachment = (value: unknown): IncomingAttachment | null => {
+  if (typeof value !== "string" || !value.startsWith("Attached file \"")) return null;
+  const marker = "\":\n\n";
+  const end = value.indexOf(marker, 15);
+  if (end < 0) return null;
+  const name = value.slice(15, end);
+  if (!name || name.length > 200) return null;
+  return { name, mime: "text/plain", kind: "text", data: value.slice(end + marker.length) };
+};
+const legacyMessage = (content: any[]) => {
+  const text: string[] = []; const attachments: IncomingAttachment[] = [];
+  for (const item of content) {
+    if (item.type !== "text") continue;
+    const attachment = legacyAttachment(item.text);
+    if (attachment) attachments.push(attachment); else text.push(String(item.text || ""));
+  }
+  return { text: text.join("\n"), attachments };
+};
+const userMessage = (content: any[], stored?: { prompt: string; attachments: AttachmentSummary[] } | null) => ({
+  text: stored ? stored.prompt : content.filter((item: any) => item.type === "text").map((item: any) => item.text).join("\n"),
+  attachments: stored?.attachments || content.filter((item: any) => ["image", "localImage", "audio", "localAudio"].includes(item.type)).map((item: any, index: number) => ({ id: item.id, name: item.path?.split("/").pop() || `${item.type.startsWith("audio") || item.type === "localAudio" ? "Audio" : "Image"} ${index + 1}`, kind: item.type.startsWith("audio") || item.type === "localAudio" ? "audio" : "image", data: item.url?.startsWith("data:") ? item.url : undefined })),
 });
 async function processRss(pid?: number) {
   if (!pid || process.platform !== "linux") return null;
@@ -37,12 +57,31 @@ async function allThreads(codex: CodexClient, archived: boolean) {
   } while (cursor && pages < 100);
   return threads;
 }
-const threadItems = (thread: any) => (thread.turns || []).flatMap((turn: any) => (turn.items || []).flatMap((item: any) => {
-  if (item.type === "userMessage") return [{ type: "user_message", id: item.id, ...userMessage(item.content || []) }];
-  const mapped = adapt({ method: "item/completed", params: { threadId: thread.id, item } }); return mapped?.items || [];
-}));
+const threadItems = async (thread: any, attachmentStore: AttachmentStore) => {
+  const result: any[] = [];
+  for (const turn of thread.turns || []) for (const item of turn.items || []) {
+    if (item.type === "userMessage") {
+      let stored = await attachmentStore.load(thread.id, item.id, turn.id);
+      if (!stored) {
+        const legacy = legacyMessage(item.content || []);
+        if (legacy.attachments.length) {
+          try {
+            const migrated = await attachmentStore.save(thread.id, item.id, legacy.text, legacy.attachments);
+            try { await attachmentStore.setTurnId(thread.id, item.id, turn.id); } catch { /* The recovered manifest is still usable by message ID. */ }
+            stored = migrated;
+          } catch { /* Keep the original text visible if a legacy attachment cannot be migrated. */ }
+        }
+      }
+      result.push({ type: "user_message", id: item.id, ...userMessage(item.content || [], stored) });
+    } else {
+      const mapped = adapt({ method: "item/completed", params: { threadId: thread.id, item } });
+      result.push(...(mapped?.items || []));
+    }
+  }
+  return result;
+};
 
-export function wireSockets(wss: WebSocketServer, codex: CodexClient, fs: WorkspaceFs, meta: any) {
+export function wireSockets(wss: WebSocketServer, codex: CodexClient, fs: WorkspaceFs, attachmentStore: AttachmentStore, meta: any) {
   const clients = new Set<WebSocket>();
   const pendingApprovals = new Map<string | number, { threadId?: string; item: any }>();
   const broadcast = (data: any) => clients.forEach((socket) => send(socket, data));
@@ -75,7 +114,7 @@ export function wireSockets(wss: WebSocketServer, codex: CodexClient, fs: Worksp
             try { await fs.selectAbsolute(result.thread.cwd); broadcast({ type: "status", ...meta(), codexStatus: codex.status }); } catch { /* The session can still be viewed outside the file-browser root. */ }
           }
           const pending = [...pendingApprovals.values()].filter((entry) => entry.threadId === result.thread.id).map((entry) => entry.item);
-          send(socket, { type: "thread.active", thread: result.thread, items: [...threadItems(result.thread), ...pending], model: result.model, effort: result.reasoningEffort });
+          send(socket, { type: "thread.active", thread: result.thread, items: [...await threadItems(result.thread, attachmentStore), ...pending], model: result.model, effort: result.reasoningEffort });
         } else if (msg.type === "thread.archive") {
           await codex.request("thread/archive", { threadId: msg.threadId });
           broadcast({ type: "thread.mutated", action: "archive", threadId: msg.threadId });
@@ -84,16 +123,25 @@ export function wireSockets(wss: WebSocketServer, codex: CodexClient, fs: Worksp
           broadcast({ type: "thread.mutated", action: "unarchive", threadId: msg.threadId, thread: result.thread });
         } else if (msg.type === "thread.delete") {
           await codex.request("thread/delete", { threadId: msg.threadId });
+          await attachmentStore.removeThread(String(msg.threadId || ""));
           broadcast({ type: "thread.mutated", action: "delete", threadId: msg.threadId });
         } else if (msg.type === "turn.send") {
           const text = String(msg.text || "").trim(); const attachments = Array.isArray(msg.attachments) ? msg.attachments.slice(0, 4) : []; if (!text && !attachments.length) return;
+          const messageId = typeof msg.clientUserMessageId === "string" && /^[A-Za-z0-9_-]{1,160}$/.test(msg.clientUserMessageId) ? msg.clientUserMessageId : crypto.randomUUID();
+          const persisted = attachments.length ? await attachmentStore.save(String(msg.threadId || ""), messageId, text, attachments as IncomingAttachment[]) : null;
           const input: any[] = text ? [{ type: "text", text, text_elements: [] }] : [];
-          for (const attachment of attachments) {
-            if (attachment.kind === "image" && typeof attachment.data === "string" && attachment.data.startsWith("data:image/") && attachment.data.length <= 14 * 1024 * 1024) input.push({ type: "image", url: attachment.data });
-            else if (attachment.kind === "text" && typeof attachment.data === "string" && Buffer.byteLength(attachment.data, "utf8") <= 1024 * 1024) input.push({ type: "text", text: `Attached file \"${String(attachment.name || "attachment").slice(0, 200)}\":\n\n${attachment.data}`, text_elements: [] });
+          for (const attachment of persisted?.prepared || []) {
+            if (attachment.kind === "image") input.push({ type: "image", url: attachment.dataUrl });
+            else input.push({ type: "text", text: `Attached file \"${attachment.name}\":\n\n${attachment.text || ""}`, text_elements: [] });
           }
-          const result = await codex.request("turn/start", { threadId: msg.threadId, input, model: msg.model || null, effort: msg.effort || null, ...turnPermissionSettings(msg.permission, fs.path), summary: "auto" });
-          send(socket, { type: "turn.accepted", turnId: result.turn.id });
+          try {
+            const result = await codex.request("turn/start", { threadId: msg.threadId, input, clientUserMessageId: messageId, model: msg.model || null, effort: msg.effort || null, ...turnPermissionSettings(msg.permission, fs.path), summary: "auto" });
+            if (persisted) { try { await attachmentStore.setTurnId(String(msg.threadId || ""), messageId, result.turn.id); } catch { /* The turn is already accepted; metadata can still be recovered by message ID. */ } }
+            send(socket, { type: "turn.accepted", turnId: result.turn.id, messageId, attachments: persisted?.attachments || [] });
+          } catch (error) {
+            if (persisted) await attachmentStore.removeMessage(String(msg.threadId || ""), messageId);
+            throw error;
+          }
         } else if (msg.type === "turn.interrupt") await codex.request("turn/interrupt", { threadId: msg.threadId, turnId: msg.turnId });
         else if (msg.type === "approval.respond") { pendingApprovals.delete(msg.requestId); codex.respond(msg.requestId, { decision: msg.decision }); }
         else if (msg.type === "fs.list") { try { send(socket, { type: "fs.entries", path: msg.path || "", entries: await fs.list(msg.path || "") }); } catch (error) { send(socket, { type: "fs.entries", path: msg.path || "", error: error instanceof Error ? error.message : String(error) }); } }

@@ -34,6 +34,7 @@ const mergeItems = (current: UiItem[], incoming: UiItem[]) => {
   return next;
 };
 const diffFromItems = (value: UiItem[]) => value.filter((item): item is Extract<UiItem, { type: "file_change" }> => item.type === "file_change" && Boolean(item.diff)).map((item) => /^(diff --git|--- )/m.test(item.diff || "") ? item.diff : `diff --git a/${item.path} b/${item.path}\n--- a/${item.path}\n+++ b/${item.path}\n${item.diff}`).join("\n");
+const displayAttachment = (item: ComposerAttachment) => ({ id: item.id, name: item.name, mime: item.mime, kind: item.kind, size: item.size, data: item.kind === "image" ? item.data : undefined });
 const editDiff = (path: string, before: string, after: string) => {
   const oldLines = before.split("\n"); const newLines = after.split("\n");
   let prefix = 0; while (prefix < oldLines.length && prefix < newLines.length && oldLines[prefix] === newLines[prefix]) prefix++;
@@ -79,9 +80,9 @@ export function App() {
       setModel((current) => current || preferred?.model || ""); setEffort((current) => current || preferred?.defaultReasoningEffort || "");
     } else if (message.type === "thread.active") {
       const nextItems = message.items || []; const queued = queuedPrompt.current;
-      setActive(message.thread); updateSessionUrl(message.thread.id); setItems(queued ? [{ type: "user_message", id: queued.id, text: queued.text, attachments: queued.attachments.map((item) => ({ name: item.name, kind: item.kind, data: item.kind === "image" ? item.data : undefined })) }] : nextItems); setDiff(diffFromItems(nextItems)); setThreadUsage(null); setCompaction(message.compaction || null); setRunning(Boolean(queued));
+      setActive(message.thread); updateSessionUrl(message.thread.id); setItems(queued ? [{ type: "user_message", id: queued.id, text: queued.text, attachments: queued.attachments.map(displayAttachment) }] : nextItems); setDiff(diffFromItems(nextItems)); setThreadUsage(null); setCompaction(message.compaction || null); setRunning(Boolean(queued));
       if (message.model) setModel(message.model); if (message.effort) setEffort(message.effort);
-      if (queued) { queuedPrompt.current = null; sendRef.current({ type: "turn.send", threadId: message.thread.id, text: queued.text, attachments: queued.attachments, model: modelRef.current, effort: effortRef.current }); }
+      if (queued) { queuedPrompt.current = null; sendRef.current({ type: "turn.send", threadId: message.thread.id, clientUserMessageId: queued.id, text: queued.text, attachments: queued.attachments, model: modelRef.current, effort: effortRef.current }); }
     } else if (message.type === "thread.changed") setThreads((old) => [message.thread, ...old.filter((entry) => entry.id !== message.thread.id)]);
     else if (message.type === "thread.mutated") {
       setThreads((old) => old.filter((entry) => entry.id !== message.threadId)); setArchivedThreads((old) => old.filter((entry) => entry.id !== message.threadId));
@@ -90,7 +91,14 @@ export function App() {
     } else if (message.type === "items") setItems((old) => mergeItems(old, message.items));
     else if (message.type === "event" && (!message.threadId || message.threadId === activeRef.current?.id)) {
       if (message.items) setItems((old) => mergeItems(old, message.items)); if (message.diff !== undefined) setDiff(message.diff); if (message.tokenUsage) setThreadUsage(message.tokenUsage); if (message.compaction) setCompaction(message.compaction); if (message.running !== undefined) setRunning(message.running); if (message.turnId) setTurnId(message.turnId);
-    } else if (message.type === "turn.accepted") { setTurnId(message.turnId); setRunning(true); }
+    } else if (message.type === "turn.accepted") {
+      setTurnId(message.turnId); setRunning(true);
+      if (message.messageId && Array.isArray(message.attachments)) setItems((old) => old.map((item) => {
+        if (item.type !== "user_message" || item.id !== message.messageId) return item;
+        const current = new Map((item.attachments || []).map((attachment) => [attachment.id, attachment]));
+        return { ...item, attachments: message.attachments.map((attachment: any) => ({ ...attachment, data: attachment.kind === "image" ? current.get(attachment.id)?.data : undefined })) };
+      }));
+    }
     else if (message.type === "fs.entries") { pending.current.get(`list:${message.path}`)?.(message); pending.current.delete(`list:${message.path}`); }
     else if (message.type === "fs.file") { pending.current.get(`read:${message.path || message.file?.path}`)?.(message); pending.current.delete(`read:${message.path || message.file?.path}`); }
     else if (message.type === "fs.saved") { pending.current.get(`write:${message.path || message.file?.path}`)?.(message); pending.current.delete(`write:${message.path || message.file?.path}`); }
@@ -125,10 +133,10 @@ export function App() {
   };
   const sendTurn = (text: string, attachments: ComposerAttachment[]) => {
     if (!active && !meta.workspaceSelected) { setWorkspacePicker(true); return false; }
-    const localId = `local-${Date.now()}`; setItems((old) => [...old, { type: "user_message", id: localId, text, attachments: attachments.map((item) => ({ name: item.name, kind: item.kind, data: item.kind === "image" ? item.data : undefined })) }]); setScrollRequest((value) => value + 1);
+    const localId = crypto.randomUUID(); setItems((old) => [...old, { type: "user_message", id: localId, text, attachments: attachments.map(displayAttachment) }]); setScrollRequest((value) => value + 1);
     if (!active) { queuedPrompt.current = { id: localId, text, attachments }; setRunning(true); send({ type: "thread.create", model, effort, permission }); return true; }
     if (demo) { setRunning(true); const id = `reply-${Date.now()}`; const words = "I’m streaming this response as it arrives from Codex, while reasoning and tool activity remain visible above the final answer.".split(" "); let index = 0; const timer = window.setInterval(() => { index++; setItems((old) => mergeItems(old, [{ type: "assistant_message", id, text: `${words[index - 1]} `, streaming: true }])); if (index >= words.length) { clearInterval(timer); setItems((old) => mergeItems(old, [{ type: "assistant_message", id, text: words.join(" "), streaming: false }])); setThreadUsage({ total: { totalTokens: 1860, inputTokens: 1530, cachedInputTokens: 720, outputTokens: 330, reasoningOutputTokens: 112 }, last: { totalTokens: 1860, inputTokens: 1530, cachedInputTokens: 720, outputTokens: 330, reasoningOutputTokens: 112 }, modelContextWindow: 114688 }); setRunning(false); } }, 75); }
-    else send({ type: "turn.send", threadId: active.id, text, attachments, model, effort, permission });
+    else send({ type: "turn.send", threadId: active.id, clientUserMessageId: localId, text, attachments, model, effort, permission });
     return true;
   };
   const request = useCallback(<T,>(key: string, message: any) => new Promise<T>((resolve) => {
@@ -165,7 +173,7 @@ export function App() {
       <header className="workspace-header"><div className="header-leading"><button className="mobile-menu icon-button" aria-label="Open threads" onClick={() => setSidebar(true)}><Menu /></button>{sidebarCollapsed && <button className="desktop-sidebar-open icon-button" aria-label="Open threads" onClick={() => setSidebarCollapsed(false)}><PanelLeftOpen /></button>}<div className="thread-heading"><strong>{title}</strong><span><i className={connected || demo ? "online" : ""} />{running ? "Codex is working" : meta.workspaceSelected ? meta.workspace.split("/").filter(Boolean).pop() : "Choose a workspace"}</span></div></div>
         <div className="header-actions"><span className={`connection ${connected || demo ? "online" : ""}`}><i />{connected || demo ? "Connected" : "Connecting"}</span>{diff && <button className="header-button changes-button" aria-label="Changes" onClick={() => setChanges(true)}><GitCompareArrows /><span>Changes</span></button>}<button className="header-button" aria-label="Files" onClick={() => meta.workspaceSelected ? setFiles(true) : setWorkspacePicker(true)}><FolderOpen /><span>Files</span></button><button className="header-icon-button" aria-label="Settings" onClick={() => setSettings(true)}><Settings2 /></button></div>
       </header>
-      <main className={`chat-main ${items.length === 0 ? "is-empty" : ""}`}><Conversation items={items} running={running} scrollRequest={scrollRequest} workspace={meta.workspace} basePath={meta.basePath} openFile={openWorkspaceFile} respond={(item, decision) => { const key = approvalDecisionKey(decision); setItems((old) => old.map((entry) => entry.id === item.id ? { ...item, status: key === "decline" || key === "cancel" ? "denied" : "approved" } : entry)); if (!demo) send({ type: "approval.respond", requestId: item.requestId, decision }); }} /><Composer running={running} disabled={!connected && !demo} send={sendTurn} stop={() => { if (active && turnId) send({ type: "turn.interrupt", threadId: active.id, turnId }); }} models={models} model={model} effort={effort} permission={permission} threadUsage={threadUsage} compaction={compaction} onModel={setModel} onEffort={setEffort} onPermission={setPermission} /></main>
+      <main className={`chat-main ${items.length === 0 ? "is-empty" : ""}`}><Conversation items={items} threadId={active?.id || ""} running={running} scrollRequest={scrollRequest} workspace={meta.workspace} basePath={meta.basePath} openFile={openWorkspaceFile} respond={(item, decision) => { const key = approvalDecisionKey(decision); setItems((old) => old.map((entry) => entry.id === item.id ? { ...item, status: key === "decline" || key === "cancel" ? "denied" : "approved" } : entry)); if (!demo) send({ type: "approval.respond", requestId: item.requestId, decision }); }} /><Composer running={running} disabled={!connected && !demo} send={sendTurn} stop={() => { if (active && turnId) send({ type: "turn.interrupt", threadId: active.id, turnId }); }} models={models} model={model} effort={effort} permission={permission} threadUsage={threadUsage} compaction={compaction} onModel={setModel} onEffort={setEffort} onPermission={setPermission} /></main>
     </section>
     {sidebar && <div className="drawer-layer sidebar-layer" onMouseDown={(event) => event.target === event.currentTarget && setSidebar(false)}><Sidebar {...sidebarProps} onDismiss={() => setSidebar(false)} /></div>}
     {files && <FileDrawer close={closeFiles} load={loadFiles} read={readFile} write={writeFile} upload={uploadFile} create={createFile} remove={deleteFile} initialPath={fileTarget} onSaved={(path, before, after) => setDiff((current) => [current, editDiff(path, before, after)].filter(Boolean).join("\n"))} />}
