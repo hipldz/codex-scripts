@@ -213,6 +213,19 @@ export class AttachmentStore {
     await fs.writeFile(file, JSON.stringify(manifest, null, 2), "utf8");
   }
 
+  async cloneMessage(sourceThreadId: string, targetThreadId: string, messageId: string) {
+    const source = this.messageDirectory(sourceThreadId, messageId); const target = this.messageDirectory(targetThreadId, messageId);
+    const targetThread = asToken(targetThreadId, ""); const targetMessage = asToken(messageId, "");
+    if (!source || !target || !targetThread || !targetMessage || source === target) return;
+    try { if (!(await fs.stat(source)).isDirectory()) return; } catch { return; }
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.cp(source, target, { recursive: true, force: true });
+    const manifestFile = path.join(target, "manifest.json"); const manifest = await this.readManifest(manifestFile); if (!manifest) return;
+    manifest.threadId = targetThread;
+    manifest.attachments = manifest.attachments.map((attachment) => ({ ...attachment, relativePath: path.posix.join(targetThread, targetMessage, path.posix.basename(attachment.relativePath)) }));
+    await fs.writeFile(manifestFile, JSON.stringify(manifest, null, 2), "utf8");
+  }
+
   async load(threadId: string, messageId: string, turnId?: string) {
     await this.init();
     const manifest = await this.findManifest(threadId, messageId, turnId);
@@ -221,9 +234,8 @@ export class AttachmentStore {
     for (const attachment of manifest.attachments) {
       const file = path.resolve(this.root, attachment.relativePath);
       if (!this.inside(file)) continue;
-      let bytes: Buffer;
-      try { bytes = await fs.readFile(file); } catch { continue; }
-      attachments.push({ id: attachment.id, name: attachment.name, mime: attachment.mime, kind: attachment.kind, size: attachment.size, data: attachment.kind === "image" ? dataUrl(attachment.mime, bytes) : undefined });
+      try { if (!(await fs.stat(file)).isFile()) continue; } catch { continue; }
+      attachments.push({ id: attachment.id, name: attachment.name, mime: attachment.mime, kind: attachment.kind, size: attachment.size });
     }
     return { messageId: manifest.messageId, prompt: manifest.prompt, attachments };
   }

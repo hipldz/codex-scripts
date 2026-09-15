@@ -11,7 +11,7 @@ export function ModelPicker({ models, model, effort, onModel, onEffort }: {
 }) {
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);
-  const selected = models.find((item) => item.model === model || item.id === model) || models[0];
+  const selected = models.find((item) => item.model === model || item.id === model);
   const efforts = selected?.supportedReasoningEfforts || [];
   const effortIndex = Math.max(0, efforts.findIndex((item) => item.reasoningEffort === effort));
   const effortProgress = efforts.length > 1 ? effortIndex / (efforts.length - 1) * 100 : 0;

@@ -1,7 +1,8 @@
 export type UserAttachment = { id?: string; name: string; mime?: string; kind: "image" | "audio" | "text"; data?: string; size?: number };
 export type ApprovalDecision = string | Record<string, unknown>;
-export type UiItem =
-  | { type: "user_message"; id: string; text: string; attachments?: UserAttachment[] }
+type TimedItem = { timestamp?: number; turnId?: string };
+export type UiItem = TimedItem & (
+  | { type: "user_message"; id: string; text: string; attachments?: UserAttachment[]; attachmentThreadId?: string }
   | { type: "assistant_message"; id: string; text: string; streaming: boolean }
   | { type: "generated_image"; id: string; src: string; alt: string }
   | { type: "thinking"; id: string; text: string; status: "running" | "done" }
@@ -10,9 +11,9 @@ export type UiItem =
   | { type: "file_change"; id: string; path: string; diff?: string; status?: string }
   | { type: "status"; id: string; title: string; detail?: string; tone?: "info" | "success" | "warning" }
   | { type: "approval"; id: string; requestId: number | string; description: string; status: "pending" | "approved" | "denied"; decisions: ApprovalDecision[]; approvalKind: "command" | "file" }
-  | { type: "error"; id: string; message: string };
+  | { type: "error"; id: string; message: string });
 
-export type Thread = { id: string; preview: string; name?: string | null; cwd?: string; updatedAt: number; status?: { type?: string } | string };
+export type Thread = { id: string; preview: string; name?: string | null; cwd?: string; createdAt?: number; updatedAt: number; forkedFromId?: string | null; status?: { type?: string } | string };
 export type FileEntry = { name: string; path: string; type: "directory" | "file" };
 
 export type ModelOption = {

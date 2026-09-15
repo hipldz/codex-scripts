@@ -50,7 +50,7 @@ chmod +x clean-all/ubuntu/clean.sh notify/ubuntu/notify.sh
 
 [`web-ui/`](web-ui/) 是一个运行在本机的轻量 Codex Web UI。浏览器使用 HTTP API 与增量轮询连接 Node 服务；Node 启动并保持一个常驻的 `codex app-server`，通过 stdio JSON-RPC 获取模型、sessions、turn 和流式事件。浏览器端不使用 WebSocket。
 
-当前版本支持分页浏览和管理 sessions、创建对话、查看回答与工具调用、workspace 文件预览/下载、图片显示、文件修改和 diff。打开 session 时只传输最近 60 条 UI 消息，生成图片通过独立 URL 加载，避免把 Base64 图片重复放进会话响应。
+当前版本支持分页浏览和管理 sessions、从任意一条 Codex 回复创建对话分支、显示消息时间、查看回答与工具调用、workspace 文件预览/下载、用户与 Codex 图片预览、文件修改和 diff。New thread 默认使用当前有效 `config.toml` 中的模型与 reasoning effort。打开 session 时只传输最近 60 条 UI 消息，生成图片通过独立 URL 加载，避免把 Base64 图片重复放进会话响应。
 
 开发运行：
 

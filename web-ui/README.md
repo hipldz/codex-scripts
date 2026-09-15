@@ -11,14 +11,14 @@ Codex 的登录状态、配置和 session 仍由 Codex 自己管理；Web UI 不
 ## 功能
 
 - 从 app-server 分页加载本机 Codex CLI、VS Code、exec、app-server 和 sub-agent sessions
-- 创建、恢复、归档、取消归档、批量操作和删除 session
+- 创建、恢复、Branch、归档、取消归档、批量操作和删除 session
 - 当前 session 写入 `?session=<id>`，刷新页面后自动恢复
-- 首次对话前选择 workspace；也可以通过环境变量预选
+- 创建新对话前从当前用户 home 中选择 workspace；已有 session 自动恢复自己的 workspace
 - 从真实 `model/list` 读取模型与 reasoning effort
 - 流式显示回答、thinking、命令、文件修改、工具调用、网页搜索、图片、hook、子 agent、review、计划更新与警告
 - 每轮活动汇总为可展开的时间线；保留文件/命令摘要和历史 context compact 记录
 - Composer 可选择会话权限：按需确认、Full access（无 sandbox / 无审批）或只读；设置会作用于后续 turn
-- 粘贴或选择图片及常见文本/代码附件；图片支持点击预览
+- 粘贴或选择图片及常见文本/代码附件；用户与 Codex 图片均支持点击预览
 - 文件树、文本文件创建/删除、预览、编辑与下载；支持向 workspace 目录上传文件
 - 按文件查看 Changes/Diff
 - 显示 context window、实时内存占用，以及独立的 5-hour / Weekly account usage 窗口
@@ -295,6 +295,10 @@ PNG、JPEG、GIF、WebP、SVG、BMP 和 AVIF 会直接显示图片预览并可�
 ```
 
 刷新该地址会等待 Codex app-server ready，然后自动执行 thread resume。点击 session 或通过 URL 恢复 session 时，页面会立即显示全局 Loading 遮罩，并在恢复成功或失败后解除，避免重复点击。`session` 可以与 `file` 参数共存；选择新 workspace、创建空白对话或删除当前 session 时会清除旧的 session 参数。
+
+每条已完成的 Codex 文本回复下方提供复制与分支操作。复制会保留回答的原始 Markdown；分支使用 app-server 原生 `thread/fork` 与该回复的 `lastTurnId` 创建新 session，只保留到这条回复为止，后续对话不会带入，原 session 也不会被修改。这里不提供点赞、点踩等无关操作。Thread/Turn 提供的时间会显示在用户与 Codex 消息下方；历史消息使用 turn 开始/完成时间，实时消息使用 item 事件时间。
+
+New thread 的默认模型与 reasoning effort 来自当前工作区生效的 `config.toml`（`model`、`model_reasoning_effort`）。仅在配置未指定时，才回退到 app-server 模型目录中标记为默认的模型；不会再直接把模型列表第一项当成用户配置。
 
 ## 内存说明
 

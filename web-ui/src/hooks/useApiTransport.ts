@@ -18,7 +18,7 @@ export function useApiTransport(onMessage: (message: any) => void, disabled = fa
         handler.current({ type: "bootstrap.stage", stage: data.stage || "starting", error: data.error || data.runtime?.lastError || "" });
         if (data.ready) {
           cursor.current = data.eventCursor || cursor.current;
-          handler.current({ type: "models", models: data.models || [] });
+          handler.current({ type: "models", models: data.models || [], defaultModel: data.defaultModel || "", defaultEffort: data.defaultEffort || "" });
           handler.current({ type: "threads", threads: data.threads || [], nextCursor: data.nextCursor || null, archived: false });
           handler.current({ type: "bootstrap.ready" });
           void poll(); return;

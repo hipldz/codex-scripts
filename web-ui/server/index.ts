@@ -65,7 +65,8 @@ const server = http.createServer(async (req, res) => {
     let download;
     try { download = await attachmentStore.resolveDownload(parts[0], parts[1], parts[2]); } catch { download = null; }
     if (!download) { res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" }); return res.end("Not found"); }
-    res.writeHead(200, { "Content-Type": download.mime, "Content-Length": download.size, "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(download.name)}`, "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff" });
+    const disposition = url.searchParams.get("inline") === "1" ? "inline" : "attachment";
+    res.writeHead(200, { "Content-Type": download.mime, "Content-Length": download.size, "Content-Disposition": `${disposition}; filename*=UTF-8''${encodeURIComponent(download.name)}`, "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff" });
     createReadStream(download.path).on("error", () => { if (!res.headersSent) res.writeHead(404); res.end(); }).pipe(res);
     return;
   }
