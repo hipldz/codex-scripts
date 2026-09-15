@@ -7,6 +7,7 @@ const MAX_UPLOAD_SIZE = 10 * 1024 * 1024;
 const textExtensions = new Set([".txt", ".md", ".mdx", ".json", ".jsonc", ".yaml", ".yml", ".xml", ".csv", ".tsv", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".py", ".pyi", ".rs", ".go", ".java", ".c", ".cc", ".cpp", ".h", ".hpp", ".css", ".scss", ".sass", ".less", ".html", ".htm", ".sh", ".bash", ".zsh", ".fish", ".toml", ".ini", ".conf", ".cfg", ".log", ".sql", ".graphql", ".gql", ".vue", ".svelte", ".kt", ".kts", ".swift", ".rb", ".php", ".scala", ".lua", ".r", ".ps1", ".bat", ".cmd", ".diff", ".patch"]);
 const textNames = new Set(["dockerfile", "makefile", "procfile", "gemfile", "rakefile", "license", "readme", ".gitignore", ".gitattributes", ".editorconfig", ".npmrc", ".nvmrc"]);
 const canPreviewText = (file: string) => { const name = path.basename(file).toLowerCase(); return textNames.has(name) || name === ".env" || name.startsWith(".env.") || textExtensions.has(path.extname(name)); };
+const imageMime = new Map([[".png", "image/png"], [".jpg", "image/jpeg"], [".jpeg", "image/jpeg"], [".gif", "image/gif"], [".webp", "image/webp"], [".svg", "image/svg+xml"], [".bmp", "image/bmp"], [".avif", "image/avif"]]);
 
 export class WorkspaceFs {
   private root = "";
@@ -82,11 +83,21 @@ export class WorkspaceFs {
     const file = await this.safe(relative);
     const stat = await fs.stat(file);
     if (!stat.isFile()) throw new Error("Not a file");
-    if (!canPreviewText(file)) return { path: relative, size: stat.size, previewable: false, reason: "Preview is available only for common text and code files" };
+    const mime = imageMime.get(path.extname(file).toLowerCase());
+    if (mime) return { path: relative.replaceAll("\\", "/"), size: stat.size, previewable: true, kind: "image" as const, mime };
+    if (!canPreviewText(file)) return { path: relative, size: stat.size, previewable: false, kind: "binary" as const, reason: "Preview is available only for images, common text and code files" };
     if (stat.size > MAX_TEXT_FILE_SIZE) return { path: relative, size: stat.size, previewable: false, reason: "Text file exceeds 10 MB preview limit" };
     const buffer = await fs.readFile(file);
     if (buffer.subarray(0, 8000).includes(0)) return { path: relative, size: stat.size, previewable: false, reason: "Binary content cannot be previewed as text" };
-    return { path: relative, content: buffer.toString("utf8"), size: stat.size, previewable: true };
+    return { path: relative, content: buffer.toString("utf8"), size: stat.size, previewable: true, kind: "text" as const, mime: "text/plain; charset=utf-8" };
+  }
+
+  /** Resolve a regular workspace file for an HTTP download without reading it into memory. */
+  async download(relative: string) {
+    const file = await this.safe(relative);
+    const stat = await fs.stat(file);
+    if (!stat.isFile()) throw new Error("Not a file");
+    return { path: file, name: path.basename(file), size: stat.size, mime: imageMime.get(path.extname(file).toLowerCase()) || "application/octet-stream" };
   }
 
   async write(relative: string, content: string) {

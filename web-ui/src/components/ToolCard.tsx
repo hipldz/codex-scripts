@@ -2,7 +2,7 @@ import { BrainCircuit, CheckCircle2, ChevronRight, FilePenLine, FileText, Loader
 import { useEffect, useState } from "react";
 import type { UiItem } from "../types";
 
-type ToolItem = Exclude<UiItem, { type: "user_message" | "assistant_message" | "approval" | "error" | "status" }>;
+type ToolItem = Exclude<UiItem, { type: "user_message" | "assistant_message" | "generated_image" | "approval" | "error" | "status" }>;
 const diffStats = (diff = "") => ({ add: diff.split("\n").filter((line) => line.startsWith("+") && !line.startsWith("+++ ")).length, del: diff.split("\n").filter((line) => line.startsWith("-") && !line.startsWith("--- ")).length });
 
 function TypeIcon({ item }: { item: ToolItem }) {

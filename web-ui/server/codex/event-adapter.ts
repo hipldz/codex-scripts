@@ -1,15 +1,23 @@
 import type { JsonRpcMessage, UiItem } from "./protocol.js";
 
-const diffFor = (changes: any[]) => changes?.map((c) => c.diff || c.patch || c.content || "").filter(Boolean).join("\n") || "";
+const MAX_TOOL_OUTPUT = 64 * 1024;
+const MAX_DIFF_OUTPUT = 256 * 1024;
+const clip = (value: string, limit = MAX_TOOL_OUTPUT) => value.length <= limit ? value : `${value.slice(0, limit)}\n\n… ${value.length - limit} characters omitted`;
+const diffFor = (changes: any[]) => clip(changes?.map((c) => c.diff || c.patch || c.content || "").filter(Boolean).join("\n") || "", MAX_DIFF_OUTPUT);
 const pathFor = (change: any) => change?.path || change?.file_path || change?.move_path || "Changed files";
-const details = (value: any) => value == null ? "" : typeof value === "string" ? value : JSON.stringify(value, null, 2);
+const details = (value: any) => clip(value == null ? "" : typeof value === "string" ? value : JSON.stringify(value, null, 2));
 const status = (id: string, title: string, detail?: string, tone: "info" | "success" | "warning" = "info") => ({ type: "status" as const, id, title, detail, tone });
 const itemActivity = (item: any, done: boolean): UiItem[] => {
   const state = done ? "done" : "running";
   if (item.type === "plan") return [status(item.id, "Plan updated", item.text)];
   if (item.type === "webSearch") return [{ type: "command", id: item.id, command: `Web search · ${item.query || item.searchQuery || "Search"}`, output: details(item.results || item), status: state }];
   if (item.type === "imageView") return [{ type: "file_read", id: item.id, path: item.path || "Image" }];
-  if (item.type === "imageGeneration") return [{ type: "command", id: item.id, command: "Generated image", output: details(item), status: state }];
+  if (item.type === "imageGeneration") {
+    const src = item.savedPath || item.imageUrl || item.image_url || item.url || (typeof item.result === "object" ? item.result?.image_url || item.result?.url : "");
+    if (typeof src === "string" && src) return [{ type: "generated_image", id: item.id, src, alt: item.prompt || "Generated image" }];
+    const output = details({ status: item.status, failure: item.failure, revisedPrompt: item.revisedPrompt });
+    return [{ type: "command", id: item.id, command: "Generated image", output, status: item.status === "failed" ? "error" : state }];
+  }
   if (item.type === "sleep") return [status(item.id, "Waiting", item.reason || item.duration || "")];
   if (item.type === "collabAgentToolCall") return [{ type: "command", id: item.id, command: `Agent collaboration · ${item.tool}`, output: details({ prompt: item.prompt, agents: item.agentsStates, model: item.model }), status: state }];
   if (item.type === "subAgentActivity") return [status(item.id, `Sub-agent · ${item.kind}`, item.agentPath)];
@@ -41,10 +49,10 @@ export function adapt(message: JsonRpcMessage): { threadId?: string; items?: UiI
     const done = message.method === "item/completed";
     if (item.type === "contextCompaction") return { threadId: p.threadId, turnId: p.turnId, compaction: { status: done ? "completed" : "running", at: done ? Date.now() : undefined }, items: done ? [status(`compaction-${p.turnId}`, "Context automatically compacted", "Older conversation context was summarized.", "success")] : [status(`compaction-${p.turnId}`, "Compacting context…", "Summarizing older conversation context.")] };
     if (item.type === "agentMessage") return { threadId: p.threadId, items: [{ type: "assistant_message", id: item.id, text: item.text || "", streaming: !done }] };
-    if (item.type === "reasoning") return { threadId: p.threadId, items: [{ type: "thinking", id: item.id, text: [...(item.summary || []), ...(item.content || [])].join("\n"), status: done ? "done" : "running" }] };
-    if (item.type === "commandExecution") return { threadId: p.threadId, items: [{ type: "command", id: item.id, command: item.command || "Command", output: item.aggregatedOutput || "", status: done ? (item.status === "failed" ? "error" : "done") : "running" }] };
+    if (item.type === "reasoning") return { threadId: p.threadId, items: [{ type: "thinking", id: item.id, text: clip([...(item.summary || []), ...(item.content || [])].join("\n")), status: done ? "done" : "running" }] };
+    if (item.type === "commandExecution") return { threadId: p.threadId, items: [{ type: "command", id: item.id, command: item.command || "Command", output: clip(item.aggregatedOutput || ""), status: done ? (item.status === "failed" ? "error" : "done") : "running" }] };
     if (item.type === "fileChange") return { threadId: p.threadId, items: (item.changes || []).map((c: any, i: number) => ({ type: "file_change", id: `${item.id}-${i}`, path: pathFor(c), diff: diffFor([c]), status: item.status })) };
-    if (item.type === "mcpToolCall" || item.type === "dynamicToolCall") return { threadId: p.threadId, items: [{ type: "command", id: item.id, command: `${item.server || item.namespace || "tool"} · ${item.tool}`, output: item.result ? JSON.stringify(item.result, null, 2) : "", status: done ? (item.error ? "error" : "done") : "running" }] };
+    if (item.type === "mcpToolCall" || item.type === "dynamicToolCall") return { threadId: p.threadId, items: [{ type: "command", id: item.id, command: `${item.server || item.namespace || "tool"} · ${item.tool}`, output: details(item.result), status: done ? (item.error ? "error" : "done") : "running" }] };
     const activity = itemActivity(item, done); if (activity.length) return { threadId: p.threadId, turnId: p.turnId, items: activity };
   }
   return null;

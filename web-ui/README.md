@@ -1,6 +1,6 @@
 # Codex Web Harness
 
-一个运行在本机的轻量 Codex Web UI。浏览器通过 WebSocket 连接 Node 桥接服务，Node 再通过 stdio JSON-RPC 与 `codex app-server` 通讯。
+一个运行在本机的轻量 Codex Web UI。浏览器通过 HTTP API 和增量轮询连接 Node 服务，Node 再通过 stdio JSON-RPC 管理常驻的 `codex app-server`。
 
 Codex 的登录状态、配置和 session 仍由 Codex 自己管理；Web UI 不读取或保存 Codex 凭据。
 
@@ -10,7 +10,7 @@ Codex 的登录状态、配置和 session 仍由 Codex 自己管理；Web UI 不
 
 ## 功能
 
-- 加载本机 Codex CLI、VS Code、exec、app-server 和 sub-agent sessions
+- 从 app-server 分页加载本机 Codex CLI、VS Code、exec、app-server 和 sub-agent sessions
 - 创建、恢复、归档、取消归档、批量操作和删除 session
 - 当前 session 写入 `?session=<id>`，刷新页面后自动恢复
 - 首次对话前选择 workspace；也可以通过环境变量预选
@@ -19,10 +19,10 @@ Codex 的登录状态、配置和 session 仍由 Codex 自己管理；Web UI 不
 - 每轮活动汇总为可展开的时间线；保留文件/命令摘要和历史 context compact 记录
 - Composer 可选择会话权限：按需确认、Full access（无 sandbox / 无审批）或只读；设置会作用于后续 turn
 - 粘贴或选择图片及常见文本/代码附件；图片支持点击预览
-- 文件树、文本文件创建/删除、预览与编辑；支持向 workspace 目录上传文件
+- 文件树、文本文件创建/删除、预览、编辑与下载；支持向 workspace 目录上传文件
 - 按文件查看 Changes/Diff
 - 显示 context window、实时内存占用，以及独立的 5-hour / Weekly account usage 窗口
-- 支持部署在 `/codex/` 之类的反向代理子路径
+- 支持部署在 `/codex/` 之类的反向代理子路径；不要求 WebSocket 反代
 
 ## 目录说明
 
@@ -181,12 +181,12 @@ $env:CODEX_WEB_PORT = "8765"
 | --- | --- | --- |
 | `CODEX_WEB_HOST` | `127.0.0.1` | Node 监听地址 |
 | `CODEX_WEB_PORT` | `8765` | Node 监听端口 |
-| `CODEX_WEB_BASE_PATH` | `/` | 页面及 WebSocket 的统一子路径 |
+| `CODEX_WEB_BASE_PATH` | `/` | 页面及 HTTP API 的统一子路径 |
 | `CODEX_WEB_AUTH` | 未启用 | 可选 Basic Auth，格式为 `username:password` |
 | `CODEX_WORKSPACE` | 未预选 | 设置后启动时直接选中该 workspace |
 | `CODEX_WORKSPACE_BASE` | 当前用户 home | Workspace picker 可以浏览的根目录 |
 
-不设置 `CODEX_WORKSPACE` 时，页面会先加载全部本地 session；创建新对话时再选择 workspace。这是推荐的默认流程。
+不设置 `CODEX_WORKSPACE` 时，页面会先加载最近 50 个本地 session；创建新对话时再选择 workspace。这是推荐的默认流程。
 
 子路径部署示例：
 
@@ -207,7 +207,7 @@ http://127.0.0.1:8765/codex/
 
 ## 访问认证
 
-默认不启用认证，行为与此前一致。如需保护整个页面、静态资源和 WebSocket，启动前设置：
+默认不启用认证，行为与此前一致。如需保护整个页面、静态资源和 HTTP API，启动前设置：
 
 ```bash
 export CODEX_WEB_AUTH='username:password'
@@ -221,7 +221,7 @@ $env:CODEX_WEB_AUTH = "username:password"
 .\scripts\codex-web.ps1 restart
 ```
 
-浏览器打开页面时会显示用户名/密码登录框。用户名或密码错误时返回 HTTP `401`，WebSocket 也会拒绝连接。
+浏览器打开页面时会显示用户名/密码登录框。用户名或密码错误时，页面和 HTTP API 都返回 `401`。
 
 不设置或删除该变量即可关闭认证：
 
@@ -239,7 +239,7 @@ Basic Auth 只是访问门槛，凭据本身仅做 Base64 编码。通过非本�
 Nginx 可以负责 TLS 和反向代理，但不能替代 Node。Node 仍需要：
 
 - 启动并管理 `codex app-server`
-- 在 stdio JSON-RPC 与 WebSocket 之间桥接
+- 在 stdio JSON-RPC 与浏览器 HTTP API 之间桥接
 - 提供受 workspace 范围保护的文件读写接口
 
 配置示例：
@@ -247,12 +247,9 @@ Nginx 可以负责 TLS 和反向代理，但不能替代 Node。Node 仍需要�
 ```nginx
 location /codex/ {
     proxy_pass http://127.0.0.1:8765/codex/;
-    proxy_http_version 1.1;
     proxy_set_header Host $host;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_set_header Upgrade $http_upgrade;
-    proxy_set_header Connection "upgrade";
 }
 ```
 
@@ -262,7 +259,7 @@ location /codex/ {
 export CODEX_WEB_BASE_PATH=/codex
 ```
 
-页面静态资源和 WebSocket 都会使用同一个 base path。
+页面静态资源、轮询和操作 API 都会使用同一个 base path。
 
 聊天回答中的本地文件链接也会使用该 base path。例如设置 `/codex` 后，workspace 文件链接会转换为：
 
@@ -288,7 +285,7 @@ Files 抽屉的路径栏提供 New 和 Upload。默认在 workspace 根目录操
 
 Files 只对常见纯文本和代码格式启用预览/编辑，例如 `.txt`、`.md`、`.json`、`.yaml`、`.csv`、`.js`、`.ts`、`.tsx`、`.py`、`.go`、`.rs`、`.java`、`.c/.cpp`、`.html`、`.css`、`.sh`、`.toml`、`.ini`、`.sql`、`.ps1`，以及 `Dockerfile`、`Makefile`、`.env`、`.gitignore` 等。文本预览/编辑上限为 10 MB；超过 1 MB 时使用不带逐行 DOM 的轻量预览。
 
-Word、PDF、Excel、图片、压缩包和其他二进制/办公格式可以上传和保存在 workspace 中，但 Files 不会尝试解析、预览或编辑，只显示文件大小和不可预览说明。
+PNG、JPEG、GIF、WebP、SVG、BMP 和 AVIF 会直接显示图片预览并可下载。Word、PDF、Excel、压缩包和其他二进制/办公格式可以上传和保存在 workspace 中，但 Files 不会尝试解析或编辑，只显示文件大小、不可预览说明和下载入口。
 
 ## Session URL
 
@@ -302,7 +299,11 @@ Word、PDF、Excel、图片、压缩包和其他二进制/办公格式可以上�
 
 ## 内存说明
 
-Node 只保存 WebSocket 连接、未完成的 JSON-RPC 请求和少量 UI 状态；完整 session 历史仍由 Codex 管理。Settings 关闭时不会持续轮询资源数据，打开后每 2 秒读取一次。
+Node 不维护浏览器 WebSocket。浏览器在生成时高频拉取增量状态，空闲时自动降频，页面隐藏时降为 15 秒；提交新 turn 后会立即唤醒轮询。Session 列表从 app-server 分页加载，打开会话只返回最近 60 条 UI 消息，更早内容按需加载，Settings 关闭时不会持续读取资源数据。
+
+会话 JSON 不包含 app-server 返回的原始 `turns`，工具输出和 diff 也有首包上限。生成图片通过受保护的图片 URL 单独读取，不会把 Base64 图片重复塞进会话响应。
+
+`codex app-server` 会在 Web UI 启动时冷加载并常驻。页面显示分阶段的全局 Loading，模型和首屏 session 同时就绪后再进入 UI。Settings 提供 Start、Stop 和 Restart，并显示 PID、运行状态与错误。
 
 生产验证中的参考值：
 
@@ -360,7 +361,7 @@ npm run build
 
 1. 重新执行 `npm run build`
 2. 确认 `CODEX_WEB_BASE_PATH` 与 Nginx location 一致
-3. 确认代理了整个 `/codex/`，包括静态资源和 WebSocket
+3. 确认代理了整个 `/codex/`，包括静态资源和 HTTP API
 
 ### 新对话无法发送
 

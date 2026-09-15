@@ -171,7 +171,7 @@ async def main():
         live.on("requestfailed", lambda r: failures.append(r.url))
         await live.goto(BASE, wait_until="domcontentloaded")
         await live.wait_for_timeout(1800)
-        assert await live.locator(".connection.online").count() == 1, "WebSocket did not connect"
+        assert await live.locator(".connection.online").count() == 1, "HTTP transport did not connect"
         assert await live.locator(".error-card").count() == 0, "Live app-server request failed"
         thread_count = await live.locator(".desktop-sidebar .thread").count()
         assert thread_count > 0, "Global session list did not load"

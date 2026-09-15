@@ -21,9 +21,12 @@ type Props = {
   onCollapse?: () => void;
   onDismiss?: () => void;
   workspace?: string;
+  moreRecent?: boolean;
+  moreArchived?: boolean;
+  loadMore?: (view: "recent" | "archived") => void;
 };
 
-export function Sidebar({ threads, archivedThreads, active, select, create, archive, unarchive, remove, chooseWorkspace, onCollapse, onDismiss, workspace }: Props) {
+export function Sidebar({ threads, archivedThreads, active, select, create, archive, unarchive, remove, chooseWorkspace, onCollapse, onDismiss, workspace, moreRecent, moreArchived, loadMore }: Props) {
   const workspaceName = workspace?.split("/").filter(Boolean).pop() || "Choose workspace";
   const [query, setQuery] = useState("");
   const [view, setView] = useState<"recent" | "archived">("recent");
@@ -33,6 +36,7 @@ export function Sidebar({ threads, archivedThreads, active, select, create, arch
   const source = view === "recent" ? threads : archivedThreads;
   const visibleThreads = source.filter((thread) => (thread.name || thread.preview || "New thread").toLowerCase().includes(query.toLowerCase()));
   useEffect(() => { setSelected(new Set()); setSelecting(false); setMenu(undefined); }, [view]);
+  useEffect(() => { if (view === "archived" && !archivedThreads.length) loadMore?.("archived"); }, [view, archivedThreads.length]);
   const toggle = (id: string) => setSelected((old) => { const next = new Set(old); next.has(id) ? next.delete(id) : next.add(id); return next; });
   const finishSelection = () => { setSelected(new Set()); setSelecting(false); };
   const batchMove = () => { selected.forEach((id) => view === "recent" ? archive(id) : unarchive(id)); finishSelection(); };
@@ -46,10 +50,10 @@ export function Sidebar({ threads, archivedThreads, active, select, create, arch
     <label className="search-threads"><Search /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search threads" /></label>
     <div className="thread-tab-row"><div className="thread-tabs"><button className={view === "recent" ? "active" : ""} onClick={() => setView("recent")}>Recent <small>{threads.length}</small></button><button className={view === "archived" ? "active" : ""} onClick={() => setView("archived")}>Archived <small>{archivedThreads.length}</small></button></div><button className={`select-threads ${selecting ? "active" : ""}`} aria-label={selecting ? "Cancel selection" : "Select threads"} onClick={() => { setSelecting(!selecting); setSelected(new Set()); }}><ListChecks /></button></div>
     {selecting && <div className="bulk-actions"><button className="bulk-select-all" onClick={() => setSelected(selected.size === visibleThreads.length ? new Set() : new Set(visibleThreads.map((thread) => thread.id)))}><span className={`thread-check ${selected.size === visibleThreads.length && visibleThreads.length ? "checked" : ""}`}>{selected.size === visibleThreads.length && visibleThreads.length ? <Check /> : null}</span>{selected.size} selected</button><button aria-label={view === "recent" ? "Archive selected" : "Restore selected"} disabled={!selected.size} onClick={batchMove}>{view === "recent" ? <Archive /> : <ArchiveRestore />}</button><button className="danger" aria-label="Delete selected" disabled={!selected.size} onClick={batchDelete}><Trash2 /></button><button aria-label="Cancel selection" onClick={finishSelection}><X /></button></div>}
-    <div className="thread-list">{visibleThreads.length ? visibleThreads.map((thread) => <div className={`thread ${active === thread.id ? "active" : ""} ${selecting ? "selecting" : ""}`} key={thread.id}>
+    <div className="thread-list">{visibleThreads.length ? <>{visibleThreads.map((thread) => <div className={`thread ${active === thread.id ? "active" : ""} ${selecting ? "selecting" : ""}`} key={thread.id}>
       <button className="thread-main" onClick={() => { if (selecting) toggle(thread.id); else { select(thread.id); onDismiss?.(); } }}>{selecting && <span className={`thread-check ${selected.has(thread.id) ? "checked" : ""}`}>{selected.has(thread.id) && <Check />}</span>}<span><b>{thread.name || thread.preview || "New thread"}</b><small>{thread.cwd ? `${thread.cwd.split("/").filter(Boolean).pop()} · ` : ""}{when(thread.updatedAt)}</small></span></button>
       {!selecting && <button className="thread-more" aria-label="Thread actions" onClick={() => setMenu(menu === thread.id ? undefined : thread.id)}><MoreHorizontal /></button>}
       {menu === thread.id && <div className="thread-menu">{view === "recent" ? <button onClick={() => { archive(thread.id); setMenu(undefined); }}><Archive />Archive</button> : <button onClick={() => { unarchive(thread.id); setMenu(undefined); }}><ArchiveRestore />Restore</button>}<button className="danger" onClick={() => deleteThread(thread.id)}><Trash2 />Delete</button></div>}
-    </div>) : <div className="thread-empty">{query ? "No matching threads" : view === "archived" ? "No archived threads" : "No recent threads"}</div>}</div>
+    </div>)}{(view === "recent" ? moreRecent : moreArchived) && !query && <button className="load-more-threads" onClick={() => loadMore?.(view)}>Load more</button>}</> : <div className="thread-empty">{query ? "No matching threads" : view === "archived" ? "No archived threads" : "No recent threads"}</div>}</div>
   </aside>;
 }

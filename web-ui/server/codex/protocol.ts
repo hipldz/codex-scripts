@@ -11,6 +11,7 @@ export type ApprovalDecision = string | Record<string, unknown>;
 export type UiItem =
   | { type: "user_message"; id: string; text: string; attachments?: Array<{ id?: string; name: string; mime?: string; kind: "image" | "audio" | "text"; data?: string; size?: number }> }
   | { type: "assistant_message"; id: string; text: string; streaming: boolean }
+  | { type: "generated_image"; id: string; src: string; alt: string }
   | { type: "thinking"; id: string; text: string; status: "running" | "done" }
   | { type: "command"; id: string; command: string; output: string; status: "running" | "done" | "error" }
   | { type: "file_read"; id: string; path: string }
