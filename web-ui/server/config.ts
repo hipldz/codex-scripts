@@ -1,4 +1,3 @@
-import path from "node:path";
 import os from "node:os";
 
 function flag(name: string) {
@@ -22,9 +21,9 @@ export const config = {
   host: process.env.CODEX_WEB_HOST || "127.0.0.1",
   port: Number(process.env.CODEX_WEB_PORT || flag("--port") || 8765),
   basePath: normalizeBasePath(process.env.CODEX_WEB_BASE_PATH || flag("--base-path") || "/"),
-  workspace: path.resolve(process.env.CODEX_WORKSPACE || flag("--workspace") || process.cwd()),
-  workspaceBase: path.resolve(process.env.CODEX_WORKSPACE_BASE || flag("--workspace-base") || os.homedir()),
-  workspaceExplicit: Boolean(process.env.CODEX_WORKSPACE || flag("--workspace")),
+  workspace: process.cwd(),
+  workspaceBase: os.homedir(),
+  workspaceExplicit: false,
   auth: basicAuth(),
   dev: process.argv.includes("--dev"),
 };

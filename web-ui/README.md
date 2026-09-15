@@ -155,7 +155,7 @@ PowerShell：
 powershell -ExecutionPolicy Bypass -File .\scripts\codex-web.ps1 start
 ```
 
-脚本继承当前终端中的 `CODEX_WEB_*` 和 `CODEX_WORKSPACE*` 环境变量。例如：
+脚本继承当前终端中的 `CODEX_WEB_*` 和 `CODEX_HOME` 环境变量。例如：
 
 ```bash
 export CODEX_WEB_BASE_PATH=/codex
@@ -183,10 +183,9 @@ $env:CODEX_WEB_PORT = "8765"
 | `CODEX_WEB_PORT` | `8765` | Node 监听端口 |
 | `CODEX_WEB_BASE_PATH` | `/` | 页面及 HTTP API 的统一子路径 |
 | `CODEX_WEB_AUTH` | 未启用 | 可选 Basic Auth，格式为 `username:password` |
-| `CODEX_WORKSPACE` | 未预选 | 设置后启动时直接选中该 workspace |
-| `CODEX_WORKSPACE_BASE` | 当前用户 home | Workspace picker 可以浏览的根目录 |
+| `CODEX_HOME` | `~/.codex` | Codex sessions、附件缓存和生成图片所在目录 |
 
-不设置 `CODEX_WORKSPACE` 时，页面会先加载最近 50 个本地 session；创建新对话时再选择 workspace。这是推荐的默认流程。
+页面会先加载最近 50 个本地 session；打开已有 session 时使用该 session 自己的 workspace，创建新对话时从当前用户 home 中选择 workspace。
 
 子路径部署示例：
 
@@ -295,7 +294,7 @@ PNG、JPEG、GIF、WebP、SVG、BMP 和 AVIF 会直接显示图片预览并可�
 /codex/?session=<thread-id>
 ```
 
-刷新该地址会等待 Codex app-server ready，然后自动执行 thread resume。`session` 可以与 `file` 参数共存；选择新 workspace、创建空白对话或删除当前 session 时会清除旧的 session 参数。
+刷新该地址会等待 Codex app-server ready，然后自动执行 thread resume。点击 session 或通过 URL 恢复 session 时，页面会立即显示全局 Loading 遮罩，并在恢复成功或失败后解除，避免重复点击。`session` 可以与 `file` 参数共存；选择新 workspace、创建空白对话或删除当前 session 时会清除旧的 session 参数。
 
 ## 内存说明
 

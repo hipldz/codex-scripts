@@ -489,8 +489,8 @@ svg { display: block; }
 .preview-head svg { width: 13px; height: 13px; }
 .preview-head small { padding: 3px 6px; border: 1px solid var(--line); border-radius: 5px; color: var(--muted); font-size: 7px; }
 .preview-actions { display: flex; align-items: center; gap: 5px; }
-.preview-actions button { height: 28px; display: flex; align-items: center; gap: 6px; padding: 0 9px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: #666762; font-size: 8px; cursor: pointer; }
-.preview-actions button:hover { background: var(--soft); }
+.preview-actions button, .preview-actions .download-file { height: 28px; display: flex; align-items: center; gap: 6px; padding: 0 9px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: #666762; font-size: 8px; cursor: pointer; }
+.preview-actions button:hover, .preview-actions .download-file:hover { background: var(--soft); }
 .preview-actions button.primary { border-color: #242422; background: #242422; color: #fff; }
 .preview-actions button.danger { border-color: transparent; color: #a54b45; }
 .preview-actions button:disabled { opacity: .45; cursor: default; }
@@ -507,8 +507,7 @@ svg { display: block; }
 .preview-unavailable > svg { width: 30px; height: 30px; margin-bottom: 12px; color: #adaea8; }.preview-unavailable b { color: #60615c; font-size: 11px; }.preview-unavailable p { margin: 7px 0 4px; font-size: 9px; line-height: 1.5; }.preview-unavailable small { font-size: 7.5px; line-height: 1.5; }
 .preview-unavailable.error { color: var(--red); }.file-preview-error { padding: 8px 13px; border-bottom: 1px solid #efc4c0; background: #fff2f1; color: #9f3d37; font-size: 8px; }
 .file-editor { width: 100%; height: 100%; flex: 1; resize: none; padding: 16px 18px; border: 0; outline: 0; background: #fcfcfb; color: var(--ink); tab-size: 2; font: 10px/1.7 ui-monospace, SFMono-Regular, Consolas, monospace; }
-.download-file { display: inline-flex; align-items: center; gap: 5px; color: inherit; text-decoration: none; }
-.download-file svg { width: 13px; height: 13px; }
+.download-file { text-decoration: none; }
 .workspace-image-preview { min-height: 0; flex: 1; display: grid; grid-template-rows: minmax(0,1fr) auto; place-items: center; gap: 10px; padding: 18px; background: #fafaf8; }.workspace-image-preview a { min-width: 0; min-height: 0; width: 100%; height: 100%; display: grid; place-items: center; cursor: zoom-in; }.workspace-image-preview img { max-width: 100%; max-height: 100%; border: 1px solid var(--line); border-radius: 8px; background: #fff; object-fit: contain; }.workspace-image-preview small { color: var(--muted); font-size: 8px; }
 .runtime-card { overflow: hidden; border: 1px solid var(--line); border-radius: 11px; background: #fafaf8; }
 .runtime-card > div:first-child { min-height: 52px; display: flex; align-items: center; gap: 9px; padding: 9px 11px; }.runtime-card small { min-width: 0; color: var(--muted); font-size: 8px; line-height: 1.4; }
@@ -782,7 +781,7 @@ svg { display: block; }
 .search input, .file-tree-actions > button, .new-file-form input, .new-file-form button, .upload-notice, .tree-row span:last-child { font-size: 11px; }
 .workspace-name { font-size: 12px; }
 .preview-head > span, .file-editor, .preview-pane pre, .diff-drawer-body pre { font-size: 11px; }
-.preview-head small, .preview-actions button, .delete-confirm, .delete-confirm button { font-size: 10px; }
+  .preview-head small, .preview-actions button, .preview-actions .download-file, .delete-confirm, .delete-confirm button { font-size: 10px; }
 .preview-unavailable b, .preview-empty b { font-size: 12px; }
 .preview-unavailable p, .preview-empty p { font-size: 10.5px; }
 .preview-unavailable small { font-size: 9.5px; }

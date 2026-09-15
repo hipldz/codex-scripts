@@ -72,6 +72,15 @@ export function App() {
   const pending = useRef(new Map<string, (value: any) => void>());
   const queuedPrompt = useRef<{ id: string; text: string; attachments: ComposerAttachment[] } | null>(null);
   const sessionToResume = useRef(initialSession);
+  const sessionLoadingRef = useRef(""); const sessionLoadingStarted = useRef(0);
+  const [sessionLoading, setSessionLoading] = useState<{ id: string; label: string } | null>(null);
+  const beginSessionLoading = useCallback((id: string, label: string) => { if (sessionLoadingRef.current) return false; sessionLoadingRef.current = id; sessionLoadingStarted.current = performance.now(); setSessionLoading({ id, label }); return true; }, []);
+  const finishSessionLoading = useCallback((id?: string) => {
+    const expected = sessionLoadingRef.current; if (!expected || (id && expected !== id)) return;
+    const clear = () => { if (sessionLoadingRef.current !== expected) return; sessionLoadingRef.current = ""; setSessionLoading(null); };
+    const delay = Math.max(0, 280 - (performance.now() - sessionLoadingStarted.current));
+    delay ? window.setTimeout(clear, delay) : clear();
+  }, []);
 
   const onMessage = useCallback((message: any) => {
     if (message.type === "status") setMeta((old) => ({ ...old, ...message }));
@@ -87,6 +96,7 @@ export function App() {
       setModel((current) => current || preferred?.model || ""); setEffort((current) => current || preferred?.defaultReasoningEffort || "");
     } else if (message.type === "thread.active") {
       const nextItems = message.items || []; const queued = queuedPrompt.current;
+      finishSessionLoading(message.thread.id);
       if (message.workspace) setMeta((old) => ({ ...old, ...message.workspace }));
       setActive(message.thread); updateSessionUrl(message.thread.id); setItems(queued ? [{ type: "user_message", id: queued.id, text: queued.text, attachments: queued.attachments.map(displayAttachment) }] : nextItems); setMessageHistory({ cursor: message.historyCursor || 0, hasEarlier: Boolean(message.hasEarlier), loading: false }); setDiff(diffFromItems(nextItems)); setThreadUsage(null); setCompaction(message.compaction || null); setRunning(Boolean(queued));
       if (message.model) setModel(message.model); if (message.effort) setEffort(message.effort);
@@ -120,10 +130,10 @@ export function App() {
     else if (message.type === "workspace.selected") { setMeta((old) => ({ ...old, ...message, workspaceSelected: true })); setWorkspacePicker(false); setActive(null); updateSessionUrl(); setItems([]); setMessageHistory({ cursor: 0, hasEarlier: false, loading: false }); setDiff(""); setThreadUsage(null); setCompaction(null); }
     else if (message.type === "system.usage") setResources(message.usage);
     else if (message.type === "account.usage") setAccount(message);
-    else if (message.type === "error") { queuedPrompt.current = null; setRunning(false); setMessageHistory((old) => ({ ...old, loading: false })); setItems((old) => [...old, { type: "error", id: `e-${Date.now()}`, message: message.message }]); }
-  }, []);
+    else if (message.type === "error") { finishSessionLoading(); queuedPrompt.current = null; setRunning(false); setMessageHistory((old) => ({ ...old, loading: false })); setItems((old) => [...old, { type: "error", id: `e-${Date.now()}`, message: message.message }]); }
+  }, [finishSessionLoading]);
   const { connected, send } = useApiTransport(onMessage, demo); const sendRef = useRef(send); sendRef.current = send;
-  useEffect(() => { if (demo || !connected || meta.codexStatus !== "ready" || !sessionToResume.current) return; const threadId = sessionToResume.current; sessionToResume.current = ""; send({ type: "thread.resume", threadId }); }, [connected, meta.codexStatus, send]);
+  useEffect(() => { if (demo || !connected || meta.codexStatus !== "ready" || !sessionToResume.current) return; const threadId = sessionToResume.current; sessionToResume.current = ""; beginSessionLoading(threadId, "Restoring your conversation"); send({ type: "thread.resume", threadId }); }, [connected, meta.codexStatus, send, beginSessionLoading]);
   useEffect(() => { if (!settings || demo || !connected) return; send({ type: "system.usage" }); if (meta.codexStatus === "ready") send({ type: "account.usage" }); const timer = window.setInterval(() => send({ type: "system.usage" }), 2000); return () => window.clearInterval(timer); }, [settings, connected, meta.codexStatus, send]);
   useEffect(() => { if (compaction?.status !== "completed" || !compaction.at) return; const at = compaction.at; const timer = window.setTimeout(() => setCompaction((current) => current?.at === at ? null : current), 6000); return () => window.clearTimeout(timer); }, [compaction]);
   useEffect(() => { if (fileTarget && meta.workspaceSelected) setFiles(true); }, [fileTarget, meta.workspaceSelected]);
@@ -133,7 +143,11 @@ export function App() {
     if (demo) { const thread = { id: `demo-${Date.now()}`, preview: "New thread", updatedAt: Date.now() / 1000 }; setThreads((old) => [thread, ...old]); setActive(thread); setItems([]); }
     else if (!meta.workspaceSelected) setWorkspacePicker(true);
   };
-  const select = (id: string) => demo ? (updateSessionUrl(id), setActive(demoThreads.find((entry) => entry.id === id) || threads.find((entry) => entry.id === id) || null), setItems(id === "demo" ? demoItems : []), setDiff(id === "demo" ? diffFromItems(demoItems) : "")) : (setMessageHistory({ cursor: 0, hasEarlier: false, loading: false }), send({ type: "thread.resume", threadId: id }));
+  const select = (id: string) => {
+    if (demo) { updateSessionUrl(id); setActive(demoThreads.find((entry) => entry.id === id) || threads.find((entry) => entry.id === id) || null); setItems(id === "demo" ? demoItems : []); setDiff(id === "demo" ? diffFromItems(demoItems) : ""); return; }
+    const target = [...threads, ...archivedThreads].find((entry) => entry.id === id); if (!beginSessionLoading(id, target?.name || target?.preview || "Loading conversation")) return;
+    setMessageHistory({ cursor: 0, hasEarlier: false, loading: false }); send({ type: "thread.resume", threadId: id });
+  };
   const mutateThread = (action: "archive" | "unarchive" | "delete", id: string) => {
     if (!demo) return send({ type: `thread.${action}`, threadId: id });
     const source = [...threads, ...archivedThreads]; const thread = source.find((entry) => entry.id === id);
@@ -179,6 +193,7 @@ export function App() {
   const closeFiles = () => { setFiles(false); setFileTarget(""); const url = new URL(location.href); if (url.searchParams.has("file")) { url.searchParams.delete("file"); history.replaceState(null, "", url); } };
   return <div className={`app-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
     {boot.active && <div className="boot-loading" role="status"><div className="boot-card"><span className="boot-spinner" /><div><b>{boot.stage}</b><small>Loading models and recent sessions…</small></div></div></div>}
+    {!boot.active && sessionLoading && <div className="boot-loading session-loading" role="status" aria-live="polite"><div className="boot-card"><span className="boot-spinner" /><div><b>Opening session</b><small>{sessionLoading.label}</small></div></div></div>}
     {!boot.active && boot.error && <div className="boot-error" role="alert"><span><b>Codex startup failed</b><small>{boot.error}</small></span><button onClick={() => { setBoot({ active: true, stage: "Restarting Codex", error: "" }); send({ type: "runtime.restart" }); }}>Retry</button></div>}
     <div className="desktop-sidebar"><Sidebar {...sidebarProps} onCollapse={() => setSidebarCollapsed(true)} /></div>
     <section className="workspace-shell">
