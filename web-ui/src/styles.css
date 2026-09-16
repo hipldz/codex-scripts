@@ -259,6 +259,11 @@ svg { display: block; }
 .assistant-body code, .user-bubble code { padding: 2px 5px; border-radius: 5px; background: #efefeb; font: 0.92em ui-monospace, SFMono-Regular, Consolas, monospace; }
 .assistant-body pre, .user-bubble pre { max-width: 100%; overflow-x: auto; padding: 14px; border-radius: 10px; background: #20211f; color: #f5f5f2; font: 10.5px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace; }
 .assistant-body pre code, .user-bubble pre code { padding: 0; background: transparent; }
+.assistant-body .markdown-table { max-width: 100%; margin: 14px 0 16px; overflow-x: auto; border: 1px solid var(--line); border-radius: 9px; }
+.assistant-body .markdown-table table { width: 100%; min-width: 520px; border-collapse: collapse; font-size: 12px; line-height: 1.55; }
+.assistant-body .markdown-table th, .assistant-body .markdown-table td { padding: 8px 10px; border: 1px solid var(--line); text-align: left; vertical-align: top; }
+.assistant-body .markdown-table th { background: var(--soft); font-weight: 650; }
+.assistant-body .markdown-table tbody tr:nth-child(even) td { background: color-mix(in srgb, var(--soft) 42%, transparent); }
 .message-time { display: block; margin-top: 6px; color: var(--faint); font-size: 8px; font-weight: 400; line-height: 1.2; }
 .message.user .message-time { text-align: right; }
 .assistant-media { display: grid; justify-items: start; }
@@ -515,6 +520,9 @@ svg { display: block; }
 .preview-pane pre.large-text-preview { padding: 16px 18px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .preview-unavailable { margin: auto; max-width: 330px; display: flex; flex-direction: column; align-items: center; padding: 30px; color: var(--muted); text-align: center; }
 .preview-unavailable > svg { width: 30px; height: 30px; margin-bottom: 12px; color: #adaea8; }.preview-unavailable b { color: #60615c; font-size: 11px; }.preview-unavailable p { margin: 7px 0 4px; font-size: 9px; line-height: 1.5; }.preview-unavailable small { font-size: 7.5px; line-height: 1.5; }
+.preview-download { min-width: 170px; height: 56px; display: inline-flex; align-items: center; justify-content: center; gap: 10px; margin: 18px 0 14px; padding: 0 22px; border-radius: 12px; background: #242422; box-shadow: 0 10px 24px rgba(24, 24, 18, .14); color: #fff; font-size: 12px; font-weight: 650; text-decoration: none; transition: transform 120ms ease, background 120ms ease, box-shadow 120ms ease; }
+.preview-download:hover { background: #080806; box-shadow: 0 13px 28px rgba(24, 24, 18, .2); color: #fff; transform: translateY(-1px); }
+.preview-download svg { width: 22px; height: 22px; }
 .preview-unavailable.error { color: var(--red); }.file-preview-error { padding: 8px 13px; border-bottom: 1px solid #efc4c0; background: #fff2f1; color: #9f3d37; font-size: 8px; }
 .file-editor { width: 100%; height: 100%; flex: 1; resize: none; padding: 16px 18px; border: 0; outline: 0; background: #fcfcfb; color: var(--ink); tab-size: 2; font: 10px/1.7 ui-monospace, SFMono-Regular, Consolas, monospace; }
 .download-file { text-decoration: none; }
@@ -726,7 +734,7 @@ svg { display: block; }
   .context-indicator > span { background: conic-gradient(#aeb0a9 var(--context-used), #444641 0); }
   .context-indicator.running > span { background: conic-gradient(var(--orange) 0 24%, #444641 24% 100%); }
   .tree-pane, .preview-pane pre, .file-editor, .diff-drawer-body pre, .changed-files { background: #1b1c1a; }
-  .preview-unavailable b { color: #d6d7d2; }.file-preview-error { background: #3b2221; border-color: #60312e; color: #e6a09c; }
+  .preview-unavailable b { color: #d6d7d2; }.preview-download { background: #eceDE9; color: #191a18; box-shadow: 0 10px 24px rgba(0, 0, 0, .24); }.preview-download:hover { background: #fff; color: #191a18; }.file-preview-error { background: #3b2221; border-color: #60312e; color: #e6a09c; }
   .upload-notice { background: #203629; }.upload-notice.error { background: #3b2221; }
   .new-file-form { background: #222320; }.new-file-form button.primary { background: #eceDE9; color: #191a18; }
   .delete-confirm { border-color: #60312e; background: #30201f; color: #e1aaa6; }

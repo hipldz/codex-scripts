@@ -16,9 +16,11 @@ Codex 的登录状态、配置和 session 仍由 Codex 自己管理；Web UI 不
 - 创建新对话前从当前用户 home 中选择 workspace；已有 session 自动恢复自己的 workspace
 - 从真实 `model/list` 读取模型与 reasoning effort
 - 流式显示回答、thinking、命令、文件修改、工具调用、网页搜索、图片、hook、子 agent、review、计划更新与警告
+- AI 回复在浏览器端渲染 Markdown/GFM，支持表格、任务列表、删除线与代码块
 - 每轮活动汇总为可展开的时间线；保留文件/命令摘要和历史 context compact 记录
 - Composer 可选择会话权限：按需确认、Full access（无 sandbox / 无审批）或只读；设置会作用于后续 turn
-- 粘贴或选择图片及常见文本/代码附件；用户与 Codex 图片均支持点击预览
+- 可在输入框粘贴或选择任意类型文件作为附件；图片支持点击预览，所有附件均会在会话中保留并可下载
+- 输入框附件单条消息最多 4 个，单个文件和所有附件合计均限制为 10 MB；文本、图片和音频会直接传给 Codex，其他二进制文件会保留为可下载附件
 - 文件树、文本文件创建/删除、预览、编辑与下载；支持向 workspace 目录上传文件
 - 按文件查看 Changes/Diff
 - 显示 context window、实时内存占用，以及独立的 5-hour / Weekly account usage 窗口
@@ -280,7 +282,7 @@ Files 抽屉的路径栏提供 New 和 Upload。默认在 workspace 根目录操
 - 不覆盖同名文件
 - 只能写入当前 workspace，不能通过 `..`、绝对路径或符号链接逃逸
 
-文本文件上传后可以直接预览和编辑；二进制文件会出现在文件树中，但不支持文本预览。
+文本文件上传后可以直接预览和编辑；二进制文件会出现在文件树中，不支持预览时会在预览区中央提供大号 Download 按钮。
 
 Files 只对常见纯文本和代码格式启用预览/编辑，例如 `.txt`、`.md`、`.json`、`.yaml`、`.csv`、`.js`、`.ts`、`.tsx`、`.py`、`.go`、`.rs`、`.java`、`.c/.cpp`、`.html`、`.css`、`.sh`、`.toml`、`.ini`、`.sql`、`.ps1`，以及 `Dockerfile`、`Makefile`、`.env`、`.gitignore` 等。文本预览/编辑上限为 10 MB；超过 1 MB 时使用不带逐行 DOM 的轻量预览。
 

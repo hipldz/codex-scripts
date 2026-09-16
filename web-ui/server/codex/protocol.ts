@@ -10,7 +10,7 @@ export type ApprovalDecision = string | Record<string, unknown>;
 
 type TimedItem = { timestamp?: number; turnId?: string };
 export type UiItem = TimedItem & (
-  | { type: "user_message"; id: string; text: string; attachments?: Array<{ id?: string; name: string; mime?: string; kind: "image" | "audio" | "text"; data?: string; size?: number }>; attachmentThreadId?: string }
+  | { type: "user_message"; id: string; text: string; attachments?: Array<{ id?: string; name: string; mime?: string; kind: "image" | "audio" | "text" | "file"; data?: string; size?: number }>; attachmentThreadId?: string }
   | { type: "assistant_message"; id: string; text: string; streaming: boolean }
   | { type: "generated_image"; id: string; src: string; alt: string }
   | { type: "thinking"; id: string; text: string; status: "running" | "done" }

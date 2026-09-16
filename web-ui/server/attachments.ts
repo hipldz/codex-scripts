@@ -3,7 +3,7 @@ import os from "node:os";
 import fs from "node:fs/promises";
 import path from "node:path";
 
-export type AttachmentKind = "image" | "text";
+export type AttachmentKind = "image" | "audio" | "text" | "file";
 
 export type IncomingAttachment = {
   id?: unknown;
@@ -57,8 +57,8 @@ type DownloadableAttachment = {
   size: number;
 };
 
-const MAX_TEXT_SIZE = 1024 * 1024;
-const MAX_IMAGE_SIZE = 10 * 1024 * 1024;
+const MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024;
+const MAX_TOTAL_ATTACHMENT_SIZE = 10 * 1024 * 1024;
 const TOKEN = /^[A-Za-z0-9_-]{1,160}$/;
 
 const asToken = (value: unknown, fallback: string = crypto.randomUUID()): string => {
@@ -96,16 +96,14 @@ function decodeData(value: unknown) {
 }
 
 function preparedAttachment(input: IncomingAttachment): PreparedAttachment {
-  const kind = input.kind === "image" || input.kind === "text" ? input.kind : null;
+  const kind = input.kind === "image" || input.kind === "audio" || input.kind === "text" || input.kind === "file" ? input.kind : null;
   if (!kind) throw new Error("Unsupported attachment type");
   const decoded = decodeData(input.data);
   const providedMime = typeof input.mime === "string" ? input.mime.trim().toLowerCase() : "";
-  const mime = kind === "image"
-    ? (decoded.mime.startsWith("image/") ? decoded.mime : providedMime.startsWith("image/") ? providedMime : "image/png")
-    : (providedMime || decoded.mime || "text/plain");
-  const limit = kind === "image" ? MAX_IMAGE_SIZE : MAX_TEXT_SIZE;
-  if (decoded.bytes.length > limit) throw new Error(`${safeName(input.name)} is too large`);
+  const mime = providedMime || decoded.mime || (kind === "image" ? "image/png" : kind === "audio" ? "audio/mpeg" : kind === "text" ? "text/plain" : "application/octet-stream");
+  if (decoded.bytes.length > MAX_ATTACHMENT_SIZE) throw new Error(`${safeName(input.name)} is too large (maximum 10 MB)`);
   if (kind === "image" && !mime.startsWith("image/")) throw new Error(`${safeName(input.name)} is not a supported image`);
+  if (kind === "audio" && !mime.startsWith("audio/")) throw new Error(`${safeName(input.name)} is not a supported audio file`);
   const name = safeName(input.name);
   const id = asToken(input.id);
   const summary: AttachmentSummary = { id, name, mime, kind, size: decoded.bytes.length };
@@ -169,6 +167,7 @@ export class AttachmentStore {
   async save(threadId: string, messageId: string, prompt: string, inputs: IncomingAttachment[]): Promise<PersistedMessage> {
     await this.init();
     const prepared = inputs.map(preparedAttachment);
+    if (prepared.reduce((total, attachment) => total + attachment.size, 0) > MAX_TOTAL_ATTACHMENT_SIZE) throw new Error("Attachments exceed the 10 MB total limit");
     const directory = this.messageDirectory(threadId, messageId);
     if (!directory) throw new Error("Invalid attachment message ID");
     try {

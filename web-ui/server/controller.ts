@@ -31,6 +31,12 @@ const userMessage = (content: any[], stored?: { prompt: string; attachments: Att
   text: stored ? stored.prompt : content.filter((item: any) => item.type === "text").map((item: any) => item.text).join("\n"),
   attachments: stored?.attachments || content.filter((item: any) => ["image", "localImage", "audio", "localAudio"].includes(item.type)).map((item: any, index: number) => ({ id: item.id, name: item.path?.split("/").pop() || `Attachment ${index + 1}`, kind: item.type.toLowerCase().includes("audio") ? "audio" : "image", data: item.url?.startsWith("data:") ? item.url : undefined })),
 });
+const codexAttachmentInput = (attachment: any) => {
+  if (attachment.kind === "image") return { type: "image", url: attachment.dataUrl };
+  if (attachment.kind === "audio") return { type: "audio", url: attachment.dataUrl };
+  if (attachment.kind === "text") return { type: "text", text: `Attached file \"${attachment.name}\":\n\n${attachment.text || ""}`, text_elements: [] };
+  return { type: "text", text: `Attached binary file \"${attachment.name}\" (${attachment.mime}, ${attachment.size} bytes). The file is preserved by Codex Web and can be downloaded from this conversation, but its binary contents are not exposed as model input. Do not infer its contents.`, text_elements: [] };
+};
 
 async function processRss(pid?: number) {
   if (!pid || process.platform !== "linux") return null;
@@ -121,7 +127,7 @@ export class CodexController {
         const messageId = typeof msg.clientUserMessageId === "string" && /^[A-Za-z0-9_-]{1,160}$/.test(msg.clientUserMessageId) ? msg.clientUserMessageId : crypto.randomUUID();
         const persisted = inputs.length ? await this.attachments.save(String(msg.threadId || ""), messageId, text, inputs as IncomingAttachment[]) : null;
         const input: any[] = text ? [{ type: "text", text, text_elements: [] }] : [];
-        for (const attachment of persisted?.prepared || []) input.push(attachment.kind === "image" ? { type: "image", url: attachment.dataUrl } : { type: "text", text: `Attached file \"${attachment.name}\":\n\n${attachment.text || ""}`, text_elements: [] });
+        for (const attachment of persisted?.prepared || []) input.push(codexAttachmentInput(attachment));
         try { const result = await this.codex.request("turn/start", { threadId: msg.threadId, input, clientUserMessageId: messageId, model: msg.model || null, effort: msg.effort || null, ...turnPermissionSettings(msg.permission, this.fs.path), summary: "auto" }); if (persisted) await this.attachments.setTurnId(String(msg.threadId || ""), messageId, result.turn.id); return [{ type: "turn.accepted", turnId: result.turn.id, messageId, attachments: persisted?.attachments || [] }]; }
         catch (error) { if (persisted) await this.attachments.removeMessage(String(msg.threadId || ""), messageId); throw error; }
       }

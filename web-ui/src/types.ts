@@ -1,4 +1,4 @@
-export type UserAttachment = { id?: string; name: string; mime?: string; kind: "image" | "audio" | "text"; data?: string; size?: number };
+export type UserAttachment = { id?: string; name: string; mime?: string; kind: "image" | "audio" | "text" | "file"; data?: string; size?: number };
 export type ApprovalDecision = string | Record<string, unknown>;
 type TimedItem = { timestamp?: number; turnId?: string };
 export type UiItem = TimedItem & (
