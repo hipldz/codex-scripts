@@ -9,6 +9,7 @@ import { SettingsDrawer, type CompactionStatus, type ResourceUsage, type ThreadU
 import { WorkspacePicker } from "./components/WorkspacePicker";
 import { demoItems, demoThreads } from "./demo";
 import { useApiTransport } from "./hooks/useApiTransport";
+import { threadIsRunning } from "./thread-status";
 import type { ApprovalDecision, FileEntry, ModelOption, Thread, UiItem } from "./types";
 
 const demo = new URLSearchParams(location.search).has("demo");
@@ -63,6 +64,7 @@ export function App() {
   const [defaultModel, setDefaultModel] = useState(demo ? demoModels[0].model : "");
   const [defaultEffort, setDefaultEffort] = useState(demo ? demoModels[0].defaultReasoningEffort : "");
   const [permission, setPermission] = useState<PermissionPreset>("ask");
+  const permissionRef = useRef(permission); permissionRef.current = permission;
   const modelRef = useRef(model); modelRef.current = model;
   const effortRef = useRef(effort); effortRef.current = effort;
   const [running, setRunning] = useState(false); const [turnId, setTurnId] = useState<string>();
@@ -93,6 +95,8 @@ export function App() {
     else if (message.type === "bootstrap.error") setBoot({ active: false, stage: "Codex failed to start", error: message.message || "Unknown startup error" });
     else if (message.type === "threads") {
       const merge = (old: Thread[]) => message.append ? [...old, ...message.threads.filter((next: Thread) => !old.some((item) => item.id === next.id))] : message.threads;
+      const current = message.threads.find((thread: Thread) => thread.id === activeRef.current?.id);
+      if (current?.status && !queuedPrompt.current) { const isRunning = threadIsRunning(current); setRunning(isRunning); if (!isRunning) setTurnId(undefined); }
       if (message.archived) { setArchivedThreads(merge); setThreadCursors((old) => ({ ...old, archived: message.nextCursor || null })); }
       else { setThreads(merge); setThreadCursors((old) => ({ ...old, recent: message.nextCursor || null })); }
     } else if (message.type === "models") {
@@ -103,9 +107,12 @@ export function App() {
       const nextItems = message.items || []; const queued = queuedPrompt.current;
       finishSessionLoading();
       if (message.workspace) setMeta((old) => ({ ...old, ...message.workspace }));
-      setActive(message.thread); updateSessionUrl(message.thread.id); setItems(queued ? [{ type: "user_message", id: queued.id, text: queued.text, attachments: queued.attachments.map(displayAttachment), timestamp: queued.createdAt }] : nextItems); setMessageHistory({ cursor: message.historyCursor || 0, hasEarlier: Boolean(message.hasEarlier), loading: false }); setDiff(diffFromItems(nextItems)); setThreadUsage(null); setCompaction(message.compaction || null); setRunning(Boolean(queued));
+      setActive(message.thread); updateSessionUrl(message.thread.id); setItems(queued ? [{ type: "user_message", id: queued.id, text: queued.text, attachments: queued.attachments.map(displayAttachment), timestamp: queued.createdAt }] : nextItems); setMessageHistory({ cursor: message.historyCursor || 0, hasEarlier: Boolean(message.hasEarlier), loading: false }); setDiff(diffFromItems(nextItems)); setThreadUsage(null); setCompaction(message.compaction || null); setRunning(Boolean(queued || message.running || threadIsRunning(message.thread))); setTurnId(message.turnId);
+      const status = message.thread.status || (typeof message.running === "boolean" ? { type: message.running ? "active" : "idle" } : undefined);
+      setThreads((old) => old.map((thread) => thread.id === message.thread.id ? { ...thread, status } : thread));
+      setArchivedThreads((old) => old.map((thread) => thread.id === message.thread.id ? { ...thread, status } : thread));
       if (message.model) setModel(message.model); if (message.effort) setEffort(message.effort);
-      if (queued) { queuedPrompt.current = null; sendRef.current({ type: "turn.send", threadId: message.thread.id, clientUserMessageId: queued.id, text: queued.text, attachments: queued.attachments, model: modelRef.current, effort: effortRef.current }); }
+      if (queued) { queuedPrompt.current = null; sendRef.current({ type: "turn.send", threadId: message.thread.id, clientUserMessageId: queued.id, text: queued.text, attachments: queued.attachments, model: modelRef.current, effort: effortRef.current, permission: permissionRef.current }); }
     } else if (message.type === "history.items" && message.threadId === activeRef.current?.id) {
       setItems((old) => [...message.items.filter((next: UiItem) => !old.some((item) => item.id === next.id)), ...old]);
       setMessageHistory({ cursor: message.historyCursor || 0, hasEarlier: Boolean(message.hasEarlier), loading: false });
@@ -115,10 +122,21 @@ export function App() {
       if (activeRef.current?.id === message.threadId && message.action !== "unarchive") { setActive(null); updateSessionUrl(); setItems([]); setMessageHistory({ cursor: 0, hasEarlier: false, loading: false }); setDiff(""); setThreadUsage(null); setCompaction(null); }
       sendRef.current({ type: "thread.list" }); sendRef.current({ type: "thread.list", archived: true });
     } else if (message.type === "items") setItems((old) => mergeItems(old, message.items));
-    else if (message.type === "event" && (!message.threadId || message.threadId === activeRef.current?.id)) {
-      if (message.items) setItems((old) => mergeItems(old, message.items)); if (message.diff !== undefined) setDiff(message.diff); if (message.tokenUsage) setThreadUsage(message.tokenUsage); if (message.compaction) setCompaction(message.compaction); if (message.running !== undefined) { setRunning(message.running); setMeta((old) => ({ ...old, runtime: { ...(old as any).runtime, busy: message.running } })); } if (message.turnId) setTurnId(message.turnId);
+    else if (message.type === "event") {
+      const nextStatus = message.threadStatus || (typeof message.running === "boolean" ? { type: message.running ? "active" : "idle" } : null);
+      if (message.threadId && nextStatus) {
+        setThreads((old) => old.map((thread) => thread.id === message.threadId ? { ...thread, status: nextStatus } : thread));
+        setArchivedThreads((old) => old.map((thread) => thread.id === message.threadId ? { ...thread, status: nextStatus } : thread));
+      }
+      if (!message.threadId || message.threadId === activeRef.current?.id) {
+        if (message.items) setItems((old) => mergeItems(old, message.items)); if (message.diff !== undefined) setDiff(message.diff); if (message.tokenUsage) setThreadUsage(message.tokenUsage); if (message.compaction) setCompaction(message.compaction);
+        const nextRunning = message.threadId ? message.threadStatus ? message.threadStatus.type === "active" : message.running : undefined;
+        if (typeof nextRunning === "boolean") { setRunning(nextRunning); if (!nextRunning) setTurnId(undefined); }
+        if (message.turnId && nextRunning !== false) setTurnId(message.turnId);
+      }
     } else if (message.type === "turn.accepted") {
       setTurnId(message.turnId); setRunning(true);
+      if (message.threadId) setThreads((old) => old.map((thread) => thread.id === message.threadId ? { ...thread, status: { type: "active" } } : thread));
       if (message.messageId && Array.isArray(message.attachments)) setItems((old) => old.map((item) => {
         if (item.type !== "user_message" || item.id !== message.messageId) return item;
         const current = new Map((item.attachments || []).map((attachment) => [attachment.id, attachment]));
@@ -135,10 +153,12 @@ export function App() {
     else if (message.type === "workspace.selected") { const availableModels = modelsRef.current; const configured = availableModels.find((item) => item.model === message.defaultModel || item.id === message.defaultModel); const preferred = configured || availableModels.find((item) => item.isDefault); const nextModel = message.defaultModel || preferred?.model || ""; const nextEffort = message.defaultEffort || configured?.defaultReasoningEffort || preferred?.defaultReasoningEffort || ""; setDefaultModel(nextModel); setDefaultEffort(nextEffort); setModel(nextModel); setEffort(nextEffort); setMeta((old) => ({ ...old, ...message, workspaceSelected: true })); setWorkspacePicker(false); setActive(null); updateSessionUrl(); setItems([]); setMessageHistory({ cursor: 0, hasEarlier: false, loading: false }); setDiff(""); setThreadUsage(null); setCompaction(null); }
     else if (message.type === "system.usage") setResources(message.usage);
     else if (message.type === "account.usage") setAccount(message);
-    else if (message.type === "error") { finishSessionLoading(); queuedPrompt.current = null; setRunning(false); setMessageHistory((old) => ({ ...old, loading: false })); setItems((old) => [...old, { type: "error", id: `e-${Date.now()}`, message: message.message }]); }
+    else if (message.type === "error") { finishSessionLoading(); if (queuedPrompt.current) { queuedPrompt.current = null; setRunning(false); } setMessageHistory((old) => ({ ...old, loading: false })); setItems((old) => [...old, { type: "error", id: `e-${Date.now()}`, message: message.message }]); }
   }, [finishSessionLoading]);
   const { connected, send } = useApiTransport(onMessage, demo); const sendRef = useRef(send); sendRef.current = send;
   useEffect(() => { if (demo || !connected || meta.codexStatus !== "ready" || !sessionToResume.current) return; const threadId = sessionToResume.current; sessionToResume.current = ""; beginSessionLoading(threadId, "Opening session"); send({ type: "thread.resume", threadId }); }, [connected, meta.codexStatus, send, beginSessionLoading]);
+  const hasRunningThreads = threads.some(threadIsRunning);
+  useEffect(() => { if (demo || !connected || !hasRunningThreads) return; const timer = window.setInterval(() => { if (!document.hidden) send({ type: "thread.list" }); }, 7_500); return () => window.clearInterval(timer); }, [connected, send, hasRunningThreads]);
   useEffect(() => { if (!settings || demo || !connected) return; send({ type: "system.usage" }); if (meta.codexStatus === "ready") send({ type: "account.usage" }); const timer = window.setInterval(() => send({ type: "system.usage" }), 2000); return () => window.clearInterval(timer); }, [settings, connected, meta.codexStatus, send]);
   useEffect(() => { if (compaction?.status !== "completed" || !compaction.at) return; const at = compaction.at; const timer = window.setTimeout(() => setCompaction((current) => current?.at === at ? null : current), 6000); return () => window.clearTimeout(timer); }, [compaction]);
   useEffect(() => { if (fileTarget && meta.workspaceSelected) setFiles(true); }, [fileTarget, meta.workspaceSelected]);
@@ -166,6 +186,7 @@ export function App() {
     if (active?.id === id && action !== "unarchive") { setActive(null); setItems([]); setDiff(""); }
   };
   const sendTurn = (text: string, attachments: ComposerAttachment[]) => {
+    if (running) return false;
     if (!active && !meta.workspaceSelected) { setWorkspacePicker(true); return false; }
     const localId = crypto.randomUUID(); const createdAt = Date.now(); setItems((old) => [...old, { type: "user_message", id: localId, text, attachments: attachments.map(displayAttachment), timestamp: createdAt }]); setScrollRequest((value) => value + 1);
     if (!active) { queuedPrompt.current = { id: localId, text, attachments, createdAt }; setRunning(true); send({ type: "thread.create", model, effort, permission }); return true; }
@@ -210,7 +231,7 @@ export function App() {
       <header className="workspace-header"><div className="header-leading"><button className="mobile-menu icon-button" aria-label="Open threads" onClick={() => setSidebar(true)}><Menu /></button>{sidebarCollapsed && <button className="desktop-sidebar-open icon-button" aria-label="Open threads" onClick={() => setSidebarCollapsed(false)}><PanelLeftOpen /></button>}<div className="thread-heading"><strong>{title}</strong><span><i className={connected || demo ? "online" : ""} />{running ? "Codex is working" : meta.workspaceSelected ? meta.workspace.split("/").filter(Boolean).pop() : "Choose a workspace"}</span></div></div>
         <div className="header-actions"><span className={`connection ${connected || demo ? "online" : ""}`}><i />{connected || demo ? "Web UI online" : "Connecting"}</span><button className={`runtime-chip ${meta.codexStatus}`} onClick={() => setSettings(true)}><i />Codex {running ? "busy" : meta.codexStatus}</button>{diff && <button className="header-button changes-button" aria-label="Changes" onClick={() => setChanges(true)}><GitCompareArrows /><span>Changes</span></button>}<button className="header-button" aria-label="Files" onClick={() => meta.workspaceSelected ? setFiles(true) : setWorkspacePicker(true)}><FolderOpen /><span>Files</span></button><button className="header-icon-button" aria-label="Settings" onClick={() => setSettings(true)}><Settings2 /></button></div>
       </header>
-      <main className={`chat-main ${items.length === 0 ? "is-empty" : ""}`}><Conversation items={items} threadId={active?.id || ""} running={running} scrollRequest={scrollRequest} workspace={meta.workspace} basePath={meta.basePath} hasEarlier={messageHistory.hasEarlier} loadingEarlier={messageHistory.loading} loadEarlier={() => { if (!active || messageHistory.loading) return; setMessageHistory((old) => ({ ...old, loading: true })); send({ type: "thread.history", threadId: active.id, before: messageHistory.cursor }); }} openFile={openWorkspaceFile} branch={branchFrom} respond={(item, decision) => { const key = approvalDecisionKey(decision); setItems((old) => old.map((entry) => entry.id === item.id ? { ...item, status: key === "decline" || key === "cancel" ? "denied" : "approved" } : entry)); if (!demo) send({ type: "approval.respond", requestId: item.requestId, decision }); }} /><Composer running={running} disabled={!connected && !demo} send={sendTurn} stop={() => { if (active && turnId) send({ type: "turn.interrupt", threadId: active.id, turnId }); }} models={models} model={model} effort={effort} permission={permission} threadUsage={threadUsage} compaction={compaction} onModel={setModel} onEffort={setEffort} onPermission={setPermission} /></main>
+      <main className={`chat-main ${items.length === 0 ? "is-empty" : ""}`}><Conversation items={items} threadId={active?.id || ""} running={running} scrollRequest={scrollRequest} workspace={meta.workspace} basePath={meta.basePath} hasEarlier={messageHistory.hasEarlier} loadingEarlier={messageHistory.loading} loadEarlier={() => { if (!active || messageHistory.loading) return; setMessageHistory((old) => ({ ...old, loading: true })); send({ type: "thread.history", threadId: active.id, before: messageHistory.cursor }); }} openFile={openWorkspaceFile} branch={branchFrom} respond={(item, decision) => { const key = approvalDecisionKey(decision); setItems((old) => old.map((entry) => entry.id === item.id ? { ...item, status: key === "decline" || key === "cancel" ? "denied" : "approved" } : entry)); if (!demo) send({ type: "approval.respond", requestId: item.requestId, decision }); }} /><Composer running={running} disabled={!connected && !demo} send={sendTurn} stop={() => { if (active) send({ type: "turn.interrupt", threadId: active.id, turnId }); }} models={models} model={model} effort={effort} permission={permission} threadUsage={threadUsage} compaction={compaction} onModel={setModel} onEffort={setEffort} onPermission={setPermission} /></main>
     </section>
     {sidebar && <div className="drawer-layer sidebar-layer" onMouseDown={(event) => event.target === event.currentTarget && setSidebar(false)}><Sidebar {...sidebarProps} onDismiss={() => setSidebar(false)} /></div>}
     {files && <FileDrawer close={closeFiles} load={loadFiles} read={readFile} write={writeFile} upload={uploadFile} create={createFile} remove={deleteFile} basePath={meta.basePath} initialPath={fileTarget} onSaved={(path, before, after) => setDiff((current) => [current, editDiff(path, before, after)].filter(Boolean).join("\n"))} />}

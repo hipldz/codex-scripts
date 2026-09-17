@@ -13,7 +13,7 @@ export type UiItem = TimedItem & (
   | { type: "approval"; id: string; requestId: number | string; description: string; status: "pending" | "approved" | "denied"; decisions: ApprovalDecision[]; approvalKind: "command" | "file" }
   | { type: "error"; id: string; message: string });
 
-export type Thread = { id: string; preview: string; name?: string | null; cwd?: string; createdAt?: number; updatedAt: number; forkedFromId?: string | null; status?: { type?: string } | string };
+export type Thread = { id: string; preview: string; name?: string | null; cwd?: string; createdAt?: number; updatedAt: number; forkedFromId?: string | null; status?: { type?: string; activeFlags?: string[] } | string };
 export type FileEntry = { name: string; path: string; type: "directory" | "file" };
 
 export type ModelOption = {

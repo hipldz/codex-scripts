@@ -20,7 +20,7 @@ Codex 的登录状态、配置和 session 仍由 Codex 自己管理；Web UI 不
 - 每轮活动汇总为可展开的时间线；保留文件/命令摘要和历史 context compact 记录
 - Composer 可选择会话权限：按需确认、Full access（无 sandbox / 无审批）或只读；设置会作用于后续 turn
 - 可在输入框粘贴或选择任意类型文件作为附件；图片支持点击预览，所有附件均会在会话中保留并可下载
-- 输入框附件单条消息最多 4 个，单个文件和所有附件合计均限制为 10 MB；文本、图片和音频会直接传给 Codex，其他二进制文件会保留为可下载附件
+- 输入框附件单条消息最多 4 个，单个文件和所有附件合计均限制为 10 MB；附件直接保存在当前 thread 的 workspace `.files/<thread.id>/`，每轮会把具体文件路径告诉 Codex；文本、图片和音频也会直接传入模型，其他二进制文件可由 Codex 按路径读取
 - 文件树、文本文件创建/删除、预览、编辑与下载；支持向 workspace 目录上传文件
 - 按文件查看 Changes/Diff
 - 显示 context window、实时内存占用，以及独立的 5-hour / Weekly account usage 窗口
@@ -28,13 +28,13 @@ Codex 的登录状态、配置和 session 仍由 Codex 自己管理；Web UI 不
 
 ## 目录说明
 
-| 路径 | 用途 | 是否手工修改 |
-| --- | --- | --- |
-| `src/` | React/TSX 前端源码 | 是 |
-| `server/` | Node/TypeScript 服务端源码 | 是 |
-| `public/` | 原样复制的静态资源 | 是 |
-| `scripts/` | Playwright 验证脚本 | 是 |
-| `dist/` | Vite 生成的前端生产文件 | 否，可删除重建 |
+| 路径           | 用途                               | 是否手工修改   |
+| -------------- | ---------------------------------- | -------------- |
+| `src/`         | React/TSX 前端源码                 | 是             |
+| `server/`      | Node/TypeScript 服务端源码         | 是             |
+| `public/`      | 原样复制的静态资源                 | 是             |
+| `scripts/`     | Playwright 验证脚本                | 是             |
+| `dist/`        | Vite 生成的前端生产文件            | 否，可删除重建 |
 | `dist-server/` | TypeScript 生成的服务端 JavaScript | 否，可删除重建 |
 
 `server/` 与 `dist-server/` 不是两套源码：
@@ -81,11 +81,11 @@ http://127.0.0.1:8765/
 
 Composer 工具栏中的权限菜单会在创建 session 时设置权限，也会在已有 session 的下一次 turn 覆盖并延续该设置：
 
-| 选项 | Codex 策略 | 适用场景 |
-| --- | --- | --- |
-| Ask when needed | `workspace-write` + `on-request` | 默认选择；允许写入 workspace，需要时向浏览器请求确认 |
-| Full access | `danger-full-access` + `never` | 无 sandbox、无审批提示，适合可信环境的长时间 unattended 任务 |
-| Read-only | `read-only` + `on-request` | 仅检查、分析或审阅代码 |
+| 选项            | Codex 策略                       | 适用场景                                                     |
+| --------------- | -------------------------------- | ------------------------------------------------------------ |
+| Ask when needed | `workspace-write` + `on-request` | 默认选择；允许写入 workspace，需要时向浏览器请求确认         |
+| Full access     | `danger-full-access` + `never`   | 无 sandbox、无审批提示，适合可信环境的长时间 unattended 任务 |
+| Read-only       | `read-only` + `on-request`       | 仅检查、分析或审阅代码                                       |
 
 `Full access` 会允许 Codex 在当前运行账户的权限范围内执行命令。只应在本机、可信 workspace 和已理解任务影响时使用。
 
@@ -179,15 +179,19 @@ $env:CODEX_WEB_PORT = "8765"
 
 所有变量都是可选的：
 
-| 变量 | 默认值 | 说明 |
-| --- | --- | --- |
-| `CODEX_WEB_HOST` | `127.0.0.1` | Node 监听地址 |
-| `CODEX_WEB_PORT` | `8765` | Node 监听端口 |
-| `CODEX_WEB_BASE_PATH` | `/` | 页面及 HTTP API 的统一子路径 |
-| `CODEX_WEB_AUTH` | 未启用 | 可选 Basic Auth，格式为 `username:password` |
-| `CODEX_HOME` | `~/.codex` | Codex sessions、附件缓存和生成图片所在目录 |
+| 变量                  | 默认值      | 说明                                                                                                                  |
+| --------------------- | ----------- | --------------------------------------------------------------------------------------------------------------------- |
+| `CODEX_WEB_HOST`      | `127.0.0.1` | Node 监听地址                                                                                                         |
+| `CODEX_WEB_PORT`      | `8765`      | Node 监听端口                                                                                                         |
+| `CODEX_WEB_BASE_PATH` | `/`         | 页面及 HTTP API 的统一子路径                                                                                          |
+| `CODEX_WEB_AUTH`      | 未启用      | 可选 Basic Auth，格式为 `username:password`                                                                           |
+| `CODEX_HOME`          | `~/.codex`  | Codex sessions、旧版 Web UI 附件缓存和 Codex 原始生成图片所在目录；新版输入框附件保存在 thread workspace 的 `.files/` |
 
 页面会先加载最近 50 个本地 session；打开已有 session 时使用该 session 自己的 workspace，创建新对话时从当前用户 home 中选择 workspace。
+
+Composer 上传文件使用 app-server 返回的 `thread.id`（不是 `sessionId`）作为目录名，例如 `.files/<thread.id>/<message-id>-0-example.pdf`。恢复和分叉 session 后也按各自 thread 的 ID 和 cwd 定位；旧版 `.files/<thread.id>/uploads/` 和 `CODEX_HOME/attachments/codex-web/` 附件仍可读取。删除 thread 不会自动删除 workspace 下的 `.files/<thread.id>/`，以免误删其中的图片或其他工作文件。
+
+创建非只读 thread 时，Web UI 会在 workspace 根目录的 `AGENTS.md` 中新增或更新有标记的规则，并保留其他项目指令；恢复、分叉或创建只读 thread 不会改写该文件。每轮输入都会向 Codex 传入具体的 `.files/<thread.id>/` 路径，但这段内部说明不会显示在用户消息气泡里。上传文件与 Codex 生成的独立交付文件（图片、文档、音频、导出文件等）都直接放在该目录，不再按类型分子目录；上传文件名前缀用于避免重名。用户明确指定其他交付路径时以用户要求为准；源码修改、项目文件和必须位于原路径的构建产物仍留在项目目录。Codex 的 `cwd` 仍是项目 workspace，不会切到 `.files/`。生成文件的归档由 Agent 执行，不是后端自动搬运，因此受当前权限和执行结果影响。如果不想把 `.files/` 提交到 Git，可在项目的 `.gitignore` 中加入它。
 
 子路径部署示例：
 

@@ -26,8 +26,9 @@ const itemActivity = (item: any, done: boolean): UiItem[] => {
   return [];
 };
 
-export function adapt(message: JsonRpcMessage): { threadId?: string; items?: UiItem[]; running?: boolean; turnId?: string; diff?: string; tokenUsage?: any; compaction?: { status: "running" | "completed"; at?: number } } | null {
+export function adapt(message: JsonRpcMessage): { threadId?: string; items?: UiItem[]; running?: boolean; turnId?: string; threadStatus?: { type: string; activeFlags?: string[] }; diff?: string; tokenUsage?: any; compaction?: { status: "running" | "completed"; at?: number } } | null {
   const p = message.params || {}; const item = p.item || {};
+  if (message.method === "thread/status/changed") return { threadId: p.threadId, threadStatus: p.status };
   if (message.method === "turn/diff/updated") return { threadId: p.threadId, turnId: p.turnId, diff: p.diff || "" };
   if (message.method === "thread/tokenUsage/updated") return { threadId: p.threadId, turnId: p.turnId, tokenUsage: p.tokenUsage };
   if (message.method === "thread/compacted") return { threadId: p.threadId, turnId: p.turnId, compaction: { status: "completed", at: Date.now() }, items: [status(`compaction-${p.turnId}`, "Context automatically compacted", "Older conversation context was summarized.", "success")] };

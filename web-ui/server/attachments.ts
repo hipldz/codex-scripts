@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { constants } from "node:fs";
 import os from "node:os";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -33,6 +34,7 @@ export type PersistedMessage = {
   prompt: string;
   attachments: AttachmentSummary[];
   prepared: PreparedAttachment[];
+  paths: string[];
 };
 
 type ManifestAttachment = Omit<AttachmentSummary, "data"> & {
@@ -56,6 +58,8 @@ type DownloadableAttachment = {
   mime: string;
   size: number;
 };
+
+type AttachmentLocation = { root: string; layout: "flat" | "uploads" | "legacy" };
 
 const MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024;
 const MAX_TOTAL_ATTACHMENT_SIZE = 10 * 1024 * 1024;
@@ -111,31 +115,77 @@ function preparedAttachment(input: IncomingAttachment): PreparedAttachment {
 }
 
 export class AttachmentStore {
-  private readonly root: string;
+  private readonly legacyRoot: string;
+  private readonly workspaces = new Map<string, string>();
 
   constructor() {
     const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
-    this.root = path.join(codexHome, "attachments", "codex-web");
+    this.legacyRoot = path.join(codexHome, "attachments", "codex-web");
   }
 
   async init() {
-    await fs.mkdir(this.root, { recursive: true });
+    // Old conversations may still have attachments in CODEX_HOME. New uploads
+    // never use this directory.
+    await fs.mkdir(this.legacyRoot, { recursive: true });
   }
 
-  private inside(candidate: string) {
-    const relative = path.relative(this.root, candidate);
+  bindThread(threadId: string, cwd: string) {
+    if (!TOKEN.test(threadId) || !path.isAbsolute(cwd)) throw new Error("Invalid thread workspace");
+    this.workspaces.set(threadId, cwd);
+  }
+
+  workspaceFor(threadId: string) {
+    return this.workspaces.get(threadId) || null;
+  }
+
+  private inside(root: string, candidate: string) {
+    const relative = path.relative(root, candidate);
     return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
   }
 
-  private messageDirectory(threadId: unknown, messageId: unknown) {
+  private async roots(threadId: string, create = false) {
+    if (!TOKEN.test(threadId)) throw new Error("Invalid thread ID");
+    const roots: AttachmentLocation[] = [];
+    const cwd = this.workspaces.get(threadId);
+    if (cwd) {
+      const workspace = await fs.realpath(cwd);
+      const root = path.join(workspace, ".files");
+      const threadRoot = path.join(root, threadId);
+      if (create) {
+        for (const directory of [root, threadRoot]) {
+          await fs.mkdir(directory, { recursive: true });
+          const real = await fs.realpath(directory);
+          if (path.relative(directory, real) !== "") throw new Error("Attachment directory cannot be a symlink");
+        }
+      }
+      try {
+        const real = await fs.realpath(threadRoot);
+        if (path.relative(threadRoot, real) === "") {
+          roots.push({ root, layout: "flat" });
+          if (!create) roots.push({ root, layout: "uploads" });
+        }
+      } catch (error: any) { if (error?.code !== "ENOENT") throw error; }
+    }
+    if (!create) roots.push({ root: await fs.realpath(this.legacyRoot), layout: "legacy" });
+    return roots;
+  }
+
+  private messageDirectory(root: string, layout: AttachmentLocation["layout"], threadId: unknown, messageId: unknown) {
     const thread = asToken(threadId, "");
     const message = asToken(messageId, "");
     if (!thread || !message) return null;
-    return path.join(this.root, thread, message);
+    return path.join(root, thread, ...(layout === "uploads" ? ["uploads"] : []), ...(layout === "flat" ? [] : [message]));
   }
 
-  private async readManifest(file: string): Promise<AttachmentManifest | null> {
+  private manifestFile(directory: string, layout: AttachmentLocation["layout"], messageId: string) {
+    return path.join(directory, layout === "flat" ? `.codex-web-${messageId}.json` : "manifest.json");
+  }
+
+  private async readManifest(file: string, root: string): Promise<AttachmentManifest | null> {
     try {
+      const directory = await fs.realpath(path.dirname(file));
+      const realFile = await fs.realpath(file);
+      if (path.relative(path.dirname(file), directory) !== "" || path.relative(file, realFile) !== "" || !this.inside(root, realFile)) return null;
       const value = JSON.parse(await fs.readFile(file, "utf8")) as AttachmentManifest;
       if (value?.version !== 1 || !Array.isArray(value.attachments) || typeof value.messageId !== "string") return null;
       return value;
@@ -145,108 +195,135 @@ export class AttachmentStore {
   }
 
   private async findManifest(threadId: string, messageId: string, turnId?: string, attachmentId?: string) {
-    const direct = this.messageDirectory(threadId, messageId);
-    if (direct) {
-      const manifest = await this.readManifest(path.join(direct, "manifest.json"));
-      if (manifest && (!attachmentId || manifest.attachments.some((item) => item.id === attachmentId))) return manifest;
-    }
-    if (!turnId && !attachmentId) return null;
-    const threadToken = asToken(threadId, "");
-    const threadDirectory = threadToken ? path.join(this.root, threadToken) : "";
-    if (!threadDirectory) return null;
-    let entries: Array<import("node:fs").Dirent> = [];
-    try { entries = await fs.readdir(threadDirectory, { withFileTypes: true }); } catch { return null; }
-    for (const entry of entries) {
-      if (!entry.isDirectory() || !TOKEN.test(entry.name)) continue;
-      const manifest = await this.readManifest(path.join(threadDirectory, entry.name, "manifest.json"));
-      if (manifest && ((turnId && manifest.turnId === turnId) || (attachmentId && manifest.attachments.some((item) => item.id === attachmentId)))) return manifest;
+    if (!TOKEN.test(threadId)) return null;
+    for (const location of await this.roots(threadId)) {
+      const direct = this.messageDirectory(location.root, location.layout, threadId, messageId);
+      if (!direct) continue;
+      const matches = (manifest: AttachmentManifest | null) => manifest?.threadId === threadId && (!attachmentId || manifest.attachments.some((item) => item.id === attachmentId));
+      const manifest = await this.readManifest(this.manifestFile(direct, location.layout, messageId), location.root);
+      if (matches(manifest)) return { manifest: manifest!, ...location, directory: direct };
+      if (!turnId && !attachmentId) continue;
+      const threadDirectory = location.layout === "flat" ? direct : path.dirname(direct);
+      let entries: Array<import("node:fs").Dirent> = [];
+      try { entries = await fs.readdir(threadDirectory, { withFileTypes: true }); } catch { continue; }
+      for (const entry of entries) {
+        if (location.layout === "flat" ? !entry.isFile() || !/^\.codex-web-[A-Za-z0-9_-]{1,160}\.json$/.test(entry.name) : !entry.isDirectory() || !TOKEN.test(entry.name)) continue;
+        const found = await this.readManifest(location.layout === "flat" ? path.join(threadDirectory, entry.name) : path.join(threadDirectory, entry.name, "manifest.json"), location.root);
+        if (matches(found) && ((turnId && found!.turnId === turnId) || (attachmentId && found!.attachments.some((item) => item.id === attachmentId)))) return { manifest: found!, ...location, directory: location.layout === "flat" ? threadDirectory : path.join(threadDirectory, entry.name) };
+      }
     }
     return null;
   }
 
+  private async attachmentFile(root: string, relativePath: string) {
+    const file = path.resolve(root, relativePath);
+    if (!this.inside(root, file)) return null;
+    try {
+      const real = await fs.realpath(file);
+      if (!this.inside(root, real) || !(await fs.stat(real)).isFile()) return null;
+      return real;
+    } catch { return null; }
+  }
+
   async save(threadId: string, messageId: string, prompt: string, inputs: IncomingAttachment[]): Promise<PersistedMessage> {
-    await this.init();
     const prepared = inputs.map(preparedAttachment);
     if (prepared.reduce((total, attachment) => total + attachment.size, 0) > MAX_TOTAL_ATTACHMENT_SIZE) throw new Error("Attachments exceed the 10 MB total limit");
-    const directory = this.messageDirectory(threadId, messageId);
+    const location = (await this.roots(threadId, true))[0];
+    if (!location) throw new Error("Thread workspace is unavailable");
+    const directory = this.messageDirectory(location.root, "flat", threadId, messageId);
     if (!directory) throw new Error("Invalid attachment message ID");
+    const created: string[] = [];
     try {
-      await fs.mkdir(directory, { recursive: true });
       const threadToken = asToken(threadId, "thread");
       const messageToken = asToken(messageId, "message");
       const manifestAttachments: ManifestAttachment[] = [];
       for (const [index, attachment] of prepared.entries()) {
-        const fileName = `${index}-${attachment.name}`;
+        const fileName = `${messageToken}-${index}-${attachment.name}`;
         const file = path.resolve(directory, fileName);
-        if (!this.inside(file)) throw new Error("Invalid attachment path");
-        await fs.writeFile(file, attachment.bytes);
+        if (!this.inside(location.root, file)) throw new Error("Invalid attachment path");
+        await fs.writeFile(file, attachment.bytes, { flag: "wx" });
+        created.push(file);
         manifestAttachments.push({
           id: attachment.id,
           name: attachment.name,
           mime: attachment.mime,
           kind: attachment.kind,
           size: attachment.size,
-          relativePath: path.posix.join(threadToken, messageToken, fileName),
+          relativePath: path.posix.join(threadToken, fileName),
           sha256: crypto.createHash("sha256").update(attachment.bytes).digest("hex"),
         });
       }
       const manifest: AttachmentManifest = { version: 1, threadId, messageId, prompt, createdAt: Date.now(), attachments: manifestAttachments };
       const temporary = path.join(directory, `.manifest-${crypto.randomUUID()}.tmp`);
+      created.push(temporary);
       await fs.writeFile(temporary, JSON.stringify(manifest, null, 2), "utf8");
-      await fs.rename(temporary, path.join(directory, "manifest.json"));
-      return { messageId, prompt, attachments: prepared.map(({ bytes: _bytes, dataUrl: _dataUrl, text: _text, ...summary }) => summary), prepared };
+      const manifestPath = this.manifestFile(directory, "flat", messageId);
+      await fs.rename(temporary, manifestPath);
+      created.push(manifestPath);
+      return { messageId, prompt, attachments: prepared.map(({ bytes: _bytes, dataUrl: _dataUrl, text: _text, ...summary }) => summary), prepared, paths: manifestAttachments.map((attachment) => `.files/${attachment.relativePath}`) };
     } catch (error) {
-      await fs.rm(directory, { recursive: true, force: true });
+      await Promise.all(created.map((file) => fs.rm(file, { force: true })));
       throw error;
     }
   }
 
   async setTurnId(threadId: string, messageId: string, turnId: unknown) {
-    const directory = this.messageDirectory(threadId, messageId);
     const value = typeof turnId === "string" && turnId ? turnId : "";
-    if (!directory || !value) return;
-    const file = path.join(directory, "manifest.json");
-    const manifest = await this.readManifest(file);
+    if (!value) return;
+    const found = await this.findManifest(threadId, messageId);
+    if (!found) return;
+    const file = this.manifestFile(found.directory, found.layout, found.manifest.messageId);
+    const manifest = await this.readManifest(file, found.root);
     if (!manifest) return;
     manifest.turnId = value;
     await fs.writeFile(file, JSON.stringify(manifest, null, 2), "utf8");
   }
 
   async cloneMessage(sourceThreadId: string, targetThreadId: string, messageId: string) {
-    const source = this.messageDirectory(sourceThreadId, messageId); const target = this.messageDirectory(targetThreadId, messageId);
+    const found = await this.findManifest(sourceThreadId, messageId);
+    const location = (await this.roots(targetThreadId, true))[0];
+    if (!found || !location) return;
+    const target = this.messageDirectory(location.root, "flat", targetThreadId, messageId);
     const targetThread = asToken(targetThreadId, ""); const targetMessage = asToken(messageId, "");
-    if (!source || !target || !targetThread || !targetMessage || source === target) return;
-    try { if (!(await fs.stat(source)).isDirectory()) return; } catch { return; }
-    await fs.mkdir(path.dirname(target), { recursive: true });
-    await fs.cp(source, target, { recursive: true, force: true });
-    const manifestFile = path.join(target, "manifest.json"); const manifest = await this.readManifest(manifestFile); if (!manifest) return;
+    if (!target || !targetThread || !targetMessage || (found.layout === "flat" && found.directory === target)) return;
+    const targetManifest = this.manifestFile(target, "flat", messageId);
+    try { await fs.access(targetManifest); return; } catch (error: any) { if (error?.code !== "ENOENT") throw error; }
+    const manifest = structuredClone(found.manifest);
     manifest.threadId = targetThread;
-    manifest.attachments = manifest.attachments.map((attachment) => ({ ...attachment, relativePath: path.posix.join(targetThread, targetMessage, path.posix.basename(attachment.relativePath)) }));
-    await fs.writeFile(manifestFile, JSON.stringify(manifest, null, 2), "utf8");
+    const created: string[] = [];
+    try {
+      for (const [index, attachment] of manifest.attachments.entries()) {
+        const sourceFile = await this.attachmentFile(found.root, attachment.relativePath);
+        if (!sourceFile) throw new Error("Missing source attachment");
+        const fileName = `${targetMessage}-${index}-${safeName(attachment.name)}`;
+        if (fileName === "." || fileName === "..") throw new Error("Invalid source attachment");
+        const destination = path.join(target, fileName);
+        await fs.copyFile(sourceFile, destination, constants.COPYFILE_EXCL);
+        created.push(destination);
+        attachment.relativePath = path.posix.join(targetThread, fileName);
+      }
+      await fs.writeFile(targetManifest, JSON.stringify(manifest, null, 2), { encoding: "utf8", flag: "wx" });
+    } catch (error) { await Promise.all(created.map((file) => fs.rm(file, { force: true }))); throw error; }
   }
 
   async load(threadId: string, messageId: string, turnId?: string) {
-    await this.init();
-    const manifest = await this.findManifest(threadId, messageId, turnId);
-    if (!manifest) return null;
+    const found = await this.findManifest(threadId, messageId, turnId);
+    if (!found) return null;
     const attachments: AttachmentSummary[] = [];
-    for (const attachment of manifest.attachments) {
-      const file = path.resolve(this.root, attachment.relativePath);
-      if (!this.inside(file)) continue;
-      try { if (!(await fs.stat(file)).isFile()) continue; } catch { continue; }
+    for (const attachment of found.manifest.attachments) {
+      if (!(await this.attachmentFile(found.root, attachment.relativePath))) continue;
       attachments.push({ id: attachment.id, name: attachment.name, mime: attachment.mime, kind: attachment.kind, size: attachment.size });
     }
-    return { messageId: manifest.messageId, prompt: manifest.prompt, attachments };
+    return { messageId: found.manifest.messageId, prompt: found.manifest.prompt, attachments };
   }
 
   async resolveDownload(threadId: string, messageId: string, attachmentId: string): Promise<DownloadableAttachment | null> {
-    await this.init();
     if (!TOKEN.test(attachmentId)) return null;
-    const manifest = await this.findManifest(threadId, messageId, undefined, attachmentId);
-    const attachment = manifest?.attachments.find((item) => item.id === attachmentId);
-    if (!manifest || !attachment) return null;
-    const file = path.resolve(this.root, attachment.relativePath);
-    if (!this.inside(file)) return null;
+    const found = await this.findManifest(threadId, messageId, undefined, attachmentId);
+    const attachment = found?.manifest.attachments.find((item) => item.id === attachmentId);
+    if (!found || !attachment) return null;
+    const file = await this.attachmentFile(found.root, attachment.relativePath);
+    if (!file) return null;
     try {
       const stat = await fs.stat(file);
       if (!stat.isFile()) return null;
@@ -257,12 +334,19 @@ export class AttachmentStore {
   }
 
   async removeMessage(threadId: string, messageId: string) {
-    const directory = this.messageDirectory(threadId, messageId);
-    if (directory) await fs.rm(directory, { recursive: true, force: true });
+    const found = await this.findManifest(threadId, messageId);
+    if (found?.layout === "flat") {
+      for (const attachment of found.manifest.attachments) {
+        const file = await this.attachmentFile(found.root, attachment.relativePath);
+        if (file && path.dirname(file) === found.directory && path.basename(file).startsWith(`${messageId}-`)) await fs.rm(file, { force: true });
+      }
+      await fs.rm(this.manifestFile(found.directory, "flat", messageId), { force: true });
+    } else if (found?.layout === "uploads" && this.inside(path.join(found.root, threadId, "uploads"), found.directory)) await fs.rm(found.directory, { recursive: true, force: true });
   }
 
   async removeThread(threadId: string) {
     const token = asToken(threadId, "");
-    if (token) await fs.rm(path.join(this.root, token), { recursive: true, force: true });
+    if (token) await fs.rm(path.join(this.legacyRoot, token), { recursive: true, force: true });
+    this.workspaces.delete(threadId);
   }
 }

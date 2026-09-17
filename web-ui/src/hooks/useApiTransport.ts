@@ -5,6 +5,7 @@ const apiBase = () => `${location.pathname.replace(/\/?$/, "/")}api`;
 export function useApiTransport(onMessage: (message: any) => void, disabled = false) {
   const handler = useRef(onMessage); handler.current = onMessage;
   const cursor = useRef(0); const busy = useRef(false); const [connected, setConnected] = useState(disabled);
+  const runningThreads = useRef(new Set<string>());
   const wake = useRef<() => void>(() => {});
 
   useEffect(() => {
@@ -18,6 +19,7 @@ export function useApiTransport(onMessage: (message: any) => void, disabled = fa
         handler.current({ type: "bootstrap.stage", stage: data.stage || "starting", error: data.error || data.runtime?.lastError || "" });
         if (data.ready) {
           cursor.current = data.eventCursor || cursor.current;
+          runningThreads.current = new Set((data.threads || []).filter((thread: any) => thread.status?.type === "active").map((thread: any) => thread.id)); busy.current = runningThreads.current.size > 0;
           handler.current({ type: "models", models: data.models || [], defaultModel: data.defaultModel || "", defaultEffort: data.defaultEffort || "" });
           handler.current({ type: "threads", threads: data.threads || [], nextCursor: data.nextCursor || null, archived: false });
           handler.current({ type: "bootstrap.ready" });
@@ -34,7 +36,7 @@ export function useApiTransport(onMessage: (message: any) => void, disabled = fa
         const response = await fetch(`${base}/events?cursor=${cursor.current}`, { cache: "no-store" }); if (!response.ok) throw new Error("Event poll failed");
         const data = await response.json(); cursor.current = data.cursor || cursor.current;
         if (data.reset) handler.current({ type: "events.reset" });
-        for (const event of data.events || []) { const message = event.message; if (message.type === "event" && typeof message.running === "boolean") busy.current = message.running; handler.current(message); }
+        for (const event of data.events || []) { const message = event.message; if (message.type === "event" && message.threadId) { const running = message.threadStatus ? message.threadStatus.type === "active" : message.running; if (typeof running === "boolean") { if (running) runningThreads.current.add(message.threadId); else runningThreads.current.delete(message.threadId); busy.current = runningThreads.current.size > 0; } } handler.current(message); }
         setConnected(true);
       } catch { setConnected(false); }
       polling = false;
@@ -47,7 +49,7 @@ export function useApiTransport(onMessage: (message: any) => void, disabled = fa
   const send = useCallback((message: any) => {
     if (disabled) return;
     void fetch(`${apiBase()}/actions`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(message) })
-      .then(async (response) => { const data = await response.json(); if (!response.ok) throw new Error(data.error || "Request failed"); for (const item of data.messages || []) { if (item.type === "turn.accepted") busy.current = true; handler.current(item); } if (["turn.send", "turn.interrupt", "approval.respond", "runtime.start", "runtime.restart"].includes(message.type)) wake.current(); })
+      .then(async (response) => { const data = await response.json(); if (!response.ok) throw new Error(data.error || "Request failed"); for (const item of data.messages || []) { if (item.type === "threads") { for (const thread of item.threads || []) { if (thread.status?.type === "active") runningThreads.current.add(thread.id); else if (thread.status) runningThreads.current.delete(thread.id); } busy.current = runningThreads.current.size > 0; } if (item.type === "turn.accepted" || item.type === "thread.active") { const threadId = item.threadId || item.thread?.id; if (threadId) { if (item.type === "turn.accepted" || item.running) runningThreads.current.add(threadId); else runningThreads.current.delete(threadId); busy.current = runningThreads.current.size > 0; } } handler.current(item); } if (["turn.send", "turn.interrupt", "approval.respond", "runtime.start", "runtime.restart"].includes(message.type)) wake.current(); })
       .catch((error) => {
         const detail = error instanceof Error ? error.message : String(error);
         const type = message.type === "fs.list" ? "fs.entries" : message.type === "fs.read" ? "fs.file" : message.type === "fs.write" ? "fs.saved" : message.type === "fs.upload" ? "fs.uploaded" : message.type === "fs.create" ? "fs.created" : message.type === "fs.delete" ? "fs.deleted" : "error";
