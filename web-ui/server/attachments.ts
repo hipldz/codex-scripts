@@ -65,6 +65,18 @@ const MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024;
 const MAX_TOTAL_ATTACHMENT_SIZE = 10 * 1024 * 1024;
 const TOKEN = /^[A-Za-z0-9_-]{1,160}$/;
 
+async function ignoreAttachmentDirectory(workspace: string) {
+  const file = path.join(workspace, ".gitignore");
+  try {
+    if (!(await fs.lstat(file)).isFile()) return;
+    const content = await fs.readFile(file, "utf8");
+    if (content.split(/\r?\n/).some((line) => [".files", ".files/", "/.files", "/.files/"].includes(line.trim()))) return;
+    await fs.appendFile(file, `${content && !content.endsWith("\n") ? "\n" : ""}.files/\n`, "utf8");
+  } catch (error: any) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+}
+
 const asToken = (value: unknown, fallback: string = crypto.randomUUID()): string => {
   const candidate = typeof value === "string" ? value : "";
   return TOKEN.test(candidate) ? candidate : fallback;
@@ -157,6 +169,7 @@ export class AttachmentStore {
           const real = await fs.realpath(directory);
           if (path.relative(directory, real) !== "") throw new Error("Attachment directory cannot be a symlink");
         }
+        await ignoreAttachmentDirectory(workspace);
       }
       try {
         const real = await fs.realpath(threadRoot);

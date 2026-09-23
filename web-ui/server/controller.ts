@@ -1,6 +1,5 @@
 import crypto from "node:crypto";
 import nodeFs from "node:fs/promises";
-import path from "node:path";
 import v8 from "node:v8";
 import { adapt, approval } from "./codex/event-adapter.js";
 import type { CodexClient } from "./codex/client.js";
@@ -15,11 +14,6 @@ const errorMessage = (error: unknown) => error instanceof Error ? error.message 
 const HISTORY_PAGE_SIZE = 60;
 const MAX_HISTORY_ITEMS = 500;
 const WEB_UI_CONTEXT_PREFIX = "[Codex Web thread files]";
-const AGENTS_START = "<!-- codex-web:thread-files:start -->";
-const AGENTS_END = "<!-- codex-web:thread-files:end -->";
-const AGENTS_SECTION = `${AGENTS_START}
-For Codex Web turns, use the concrete .files/<thread.id>/ directory supplied in each turn for uploaded files and standalone files generated for the user. Keep them directly in that directory; do not create input, output, uploads, images, or scratch subdirectories unless the user explicitly asks for one. Keep tool-managed originals, report final paths, and respect an explicit user-specified destination. Do not move requested source-code edits, project files, or required build outputs away from their normal project paths. If saving an artifact fails, say so explicitly.
-${AGENTS_END}`;
 const threadDirectory = (threadId: string) => `.files/${threadId}/`;
 const threadFileContext = (threadId: string, attachmentPaths: string[]) => `${WEB_UI_CONTEXT_PREFIX} This thread's ID is ${threadId}. Keep uploads and standalone files generated for this conversation directly in ${threadDirectory(threadId)} in the current project workspace; do not create input, output, uploads, images, or scratch subdirectories unless the user explicitly asks.${attachmentPaths.length ? ` This turn's uploaded files: ${attachmentPaths.map((file) => JSON.stringify(file)).join(", ")}. Read them from the workspace when needed.` : ""} Keep tool-managed originals and report final paths. Honor an explicit user-specified path. Keep requested project/source edits and required build outputs at their normal project paths. If saving an artifact fails, say so.`;
 const visibleUserText = (value: unknown) => {
@@ -27,23 +21,6 @@ const visibleUserText = (value: unknown) => {
   const marker = text.indexOf(WEB_UI_CONTEXT_PREFIX);
   return marker < 0 ? text : text.slice(0, marker).trimEnd();
 };
-async function ensureWorkspaceInstructions(cwd: string) {
-  const file = path.join(cwd, "AGENTS.md");
-  let current = "";
-  try { if ((await nodeFs.lstat(file)).isSymbolicLink()) throw new Error("AGENTS.md cannot be a symlink"); }
-  catch (error: any) { if (error?.code !== "ENOENT") throw error; }
-  try { current = await nodeFs.readFile(file, "utf8"); }
-  catch (error: any) { if (error?.code !== "ENOENT") throw error; }
-  const start = current.indexOf(AGENTS_START);
-  const end = current.indexOf(AGENTS_END);
-  if ((start >= 0) !== (end >= 0) || (start >= 0 && end < start)) throw new Error("Incomplete Codex Web section in AGENTS.md");
-  if (start >= 0) {
-    const updated = `${current.slice(0, start)}${AGENTS_SECTION}${current.slice(end + AGENTS_END.length)}`;
-    if (updated !== current) await nodeFs.writeFile(file, updated, "utf8");
-    return;
-  }
-  await nodeFs.writeFile(file, `${current}${current && !current.endsWith("\n") ? "\n" : ""}${current ? "\n" : ""}${AGENTS_SECTION}\n`, "utf8");
-}
 const timestampMs = (value: unknown) => { const number = Number(value); return Number.isFinite(number) && number > 0 ? (number < 1e12 ? number * 1000 : number) : undefined; };
 const lastTurnIndex = (items: any[], turnId: string) => { for (let index = items.length - 1; index >= 0; index--) if (items[index]?.turnId === turnId) return index; return -1; };
 const threadSummary = (thread: any) => {
@@ -164,7 +141,7 @@ export class CodexController {
     try {
       if (msg.type === "thread.list") { const result = await this.listThreads(Boolean(msg.archived), typeof msg.cursor === "string" ? msg.cursor : null); return [{ type: "threads", archived: Boolean(msg.archived), append: Boolean(msg.cursor), threads: (result.data || []).map(threadSummary), nextCursor: result.nextCursor || null }]; }
       if (msg.type === "model.list") { const [result, defaults] = await Promise.all([this.codex.request("model/list", { limit: 50, includeHidden: false }), this.readModelDefaults(this.fs.isSelected ? this.fs.path : undefined)]); this.models = result.data || []; return [{ type: "models", models: this.models, ...defaults }]; }
-      if (msg.type === "thread.create") { if (!this.fs.isSelected) throw new Error("Choose a workspace before starting a thread"); if (msg.permission !== "read-only") await ensureWorkspaceInstructions(this.fs.path); const result = await this.codex.request("thread/start", { cwd: this.fs.path, model: msg.model || null, ...threadPermissionSettings(msg.permission), experimentalRawEvents: false }); this.attachments.bindThread(result.thread.id, result.thread.cwd || this.fs.path); this.activeThreadId = result.thread.id; this.histories.set(result.thread.id, []); const thread = threadSummary(result.thread); return [{ type: "thread.active", thread, workspace: this.meta(), items: [], historyCursor: 0, hasEarlier: false, model: result.model, effort: result.reasoningEffort }, { type: "thread.changed", thread }]; }
+      if (msg.type === "thread.create") { if (!this.fs.isSelected) throw new Error("Choose a workspace before starting a thread"); const result = await this.codex.request("thread/start", { cwd: this.fs.path, model: msg.model || null, ...threadPermissionSettings(msg.permission), experimentalRawEvents: false }); this.attachments.bindThread(result.thread.id, result.thread.cwd || this.fs.path); this.activeThreadId = result.thread.id; this.histories.set(result.thread.id, []); const thread = threadSummary(result.thread); return [{ type: "thread.active", thread, workspace: this.meta(), items: [], historyCursor: 0, hasEarlier: false, model: result.model, effort: result.reasoningEffort }, { type: "thread.changed", thread }]; }
       if (msg.type === "thread.resume") {
         const result = await this.codex.request("thread/resume", { threadId: msg.threadId });
         this.activeThreadId = result.thread.id;

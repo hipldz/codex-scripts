@@ -192,7 +192,7 @@ $env:CODEX_WEB_PORT = "8765"
 
 Composer 上传文件使用 app-server 返回的 `thread.id`（不是 `sessionId`）作为目录名，例如 `.files/<thread.id>/<message-id>-0-example.pdf`。恢复和分叉 session 后也按各自 thread 的 ID 和 cwd 定位；旧版 `.files/<thread.id>/uploads/` 和 `CODEX_HOME/attachments/codex-web/` 附件仍可读取。删除 thread 不会自动删除 workspace 下的 `.files/<thread.id>/`，以免误删其中的图片或其他工作文件。
 
-创建非只读 thread 时，Web UI 会在 workspace 根目录的 `AGENTS.md` 中新增或更新有标记的规则，并保留其他项目指令；恢复、分叉或创建只读 thread 不会改写该文件。每轮输入都会向 Codex 传入具体的 `.files/<thread.id>/` 路径，但这段内部说明不会显示在用户消息气泡里。上传文件与 Codex 生成的独立交付文件（图片、文档、音频、导出文件等）都直接放在该目录，不再按类型分子目录；上传文件名前缀用于避免重名。用户明确指定其他交付路径时以用户要求为准；源码修改、项目文件和必须位于原路径的构建产物仍留在项目目录。Codex 的 `cwd` 仍是项目 workspace，不会切到 `.files/`。生成文件的归档由 Agent 执行，不是后端自动搬运，因此受当前权限和执行结果影响。如果不想把 `.files/` 提交到 Git，可在项目的 `.gitignore` 中加入它。
+Web UI 不会创建或修改 workspace 的 `AGENTS.md`。可按需将 [AGENTS.md.template](AGENTS.md.template) 的内容手动加入 `~/.codex/AGENTS.md`。每轮输入都会向 Codex 传入具体的 `.files/<thread.id>/` 路径，但这段内部说明不会显示在用户消息气泡里。上传文件与 Codex 生成的独立交付文件（图片、文档、音频、导出文件等）都直接放在该目录，不再按类型分子目录；上传文件名前缀用于避免重名。用户明确指定其他交付路径时以用户要求为准；源码修改、项目文件和必须位于原路径的构建产物仍留在项目目录。Codex 的 `cwd` 仍是项目 workspace，不会切到 `.files/`。生成文件的归档由 Agent 执行，不是后端自动搬运，因此受当前权限和执行结果影响。首次保存附件时，如果 workspace 根目录已有 `.gitignore`，Web UI 会追加 `.files/` 忽略规则；不会为此新建 `.gitignore`，已存在相同规则时也不会重复追加。
 
 子路径部署示例：
 
