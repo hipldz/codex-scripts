@@ -14,8 +14,15 @@ import { CodexController } from "./controller.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, "..");
-const workspaceFs = new WorkspaceFs(config.workspace, config.workspaceBase, config.workspaceExplicit);
-await workspaceFs.init();
+let workspaceFs = new WorkspaceFs(config.workspace, config.workspaceBase, config.workspaceExplicit);
+try {
+  await workspaceFs.init();
+} catch (error) {
+  if (!config.workspaceExplicit) throw error;
+  console.warn(`Ignoring invalid CODEX_WEB_DEFAULT_WORKSPACE (${config.workspace}):`, error);
+  workspaceFs = new WorkspaceFs(process.cwd(), config.workspaceBase);
+  await workspaceFs.init();
+}
 const attachmentStore = new AttachmentStore();
 await attachmentStore.init();
 const codex = new CodexClient(workspaceFs.path);

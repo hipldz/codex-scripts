@@ -179,15 +179,16 @@ $env:CODEX_WEB_PORT = "8765"
 
 所有变量都是可选的：
 
-| 变量                  | 默认值      | 说明                                                                                                                  |
-| --------------------- | ----------- | --------------------------------------------------------------------------------------------------------------------- |
-| `CODEX_WEB_HOST`      | `127.0.0.1` | Node 监听地址                                                                                                         |
-| `CODEX_WEB_PORT`      | `8765`      | Node 监听端口                                                                                                         |
-| `CODEX_WEB_BASE_PATH` | `/`         | 页面及 HTTP API 的统一子路径                                                                                          |
-| `CODEX_WEB_AUTH`      | 未启用      | 可选 Basic Auth，格式为 `username:password`                                                                           |
-| `CODEX_HOME`          | `~/.codex`  | Codex sessions、旧版 Web UI 附件缓存和 Codex 原始生成图片所在目录；新版输入框附件保存在 thread workspace 的 `.files/` |
+| 变量                          | 默认值      | 说明                                                                                                                  |
+| ----------------------------- | ----------- | --------------------------------------------------------------------------------------------------------------------- |
+| `CODEX_WEB_HOST`              | `127.0.0.1` | Node 监听地址                                                                                                         |
+| `CODEX_WEB_PORT`              | `8765`      | Node 监听端口                                                                                                         |
+| `CODEX_WEB_BASE_PATH`         | `/`         | 页面及 HTTP API 的统一子路径                                                                                          |
+| `CODEX_WEB_DEFAULT_WORKSPACE` | 未设置      | 启动时默认选中的 workspace 目录；目录不存在或不可用时忽略，仍需手动选择                                               |
+| `CODEX_WEB_AUTH`              | 未启用      | 可选 Basic Auth，格式为 `username:password`                                                                           |
+| `CODEX_HOME`                  | `~/.codex`  | Codex sessions、旧版 Web UI 附件缓存和 Codex 原始生成图片所在目录；新版输入框附件保存在 thread workspace 的 `.files/` |
 
-页面会先加载最近 50 个本地 session；打开已有 session 时使用该 session 自己的 workspace，创建新对话时从当前用户 home 中选择 workspace。
+页面会先加载最近 50 个本地 session；打开已有 session 时使用该 session 自己的 workspace。设置 `CODEX_WEB_DEFAULT_WORKSPACE` 后，新对话默认使用指定目录；未设置或目录无效时，从当前用户 home 中手动选择 workspace。
 
 Composer 上传文件使用 app-server 返回的 `thread.id`（不是 `sessionId`）作为目录名，例如 `.files/<thread.id>/<message-id>-0-example.pdf`。恢复和分叉 session 后也按各自 thread 的 ID 和 cwd 定位；旧版 `.files/<thread.id>/uploads/` 和 `CODEX_HOME/attachments/codex-web/` 附件仍可读取。删除 thread 不会自动删除 workspace 下的 `.files/<thread.id>/`，以免误删其中的图片或其他工作文件。
 

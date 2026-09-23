@@ -17,6 +17,7 @@ export class WorkspaceFs {
 
   async init() {
     this.root = await fs.realpath(this.requestedRoot);
+    if (!(await fs.stat(this.root)).isDirectory()) throw new Error("Workspace must be a directory");
     this.base = await fs.realpath(this.requestedBase);
     if (!this.inside(this.base, this.root)) this.base = path.dirname(this.root);
   }
