@@ -30,7 +30,7 @@ svg { display: block; }
 .app-shell {
   width: 100%;
   height: 100dvh;
-  min-height: 560px;
+  min-height: 0;
   display: grid;
   grid-template-columns: 272px minmax(0, 1fr);
   overflow: hidden;
@@ -649,8 +649,12 @@ svg { display: block; }
   .workspace-shell { width: 100%; height: 100%; }
   .workspace-header { height: 48px; padding: 0 8px; }
   .mobile-menu { display: grid; }
-  .thread-heading { position: absolute; left: 50%; transform: translateX(-50%); align-items: center; }
-  .thread-heading strong { max-width: 180px; font-size: 11px; }
+  .header-leading { flex: 1; overflow: hidden; gap: 4px; }
+  .header-actions { flex: none; gap: 0; }
+  .mobile-menu { flex: none; }
+  .thread-heading { position: static; transform: none; flex: 1; overflow: hidden; }
+  .thread-heading strong { max-width: 100%; font-size: 12px; }
+  .runtime-chip { max-width: 80px; overflow: hidden; white-space: nowrap; }
   .thread-heading span { display: none; }
   .connection, .header-icon-button { display: none; }
   .header-button { width: 38px; padding: 0; justify-content: center; }
@@ -804,7 +808,7 @@ svg { display: block; }
 
 @media (max-width: 700px) {
   .user-bubble p, .assistant-body p, .assistant-body ul, .assistant-body ol { font-size: 13px; }
-  .composer textarea { font-size: 13px; }
+  .composer textarea { font-size: 16px; }
 }
 
 /* Drawers are read-heavy surfaces: use the same legible scale as the conversation. */
@@ -832,3 +836,20 @@ svg { display: block; }
 .workspace-current small, .workspace-current em, .workspace-folders small, .workspace-picker > footer span { font-size: 10px; }
 .changed-files button b, .file-diff-head > span { font-size: 11px; }
 .changed-files button small, .changed-files button em, .file-diff-head > div, .diff-count { font-size: 10px; }
+
+/* Status and search feedback remain readable on narrow screens. */
+.delivery-state { display: block; margin-top: 7px; color: var(--muted); font-size: 11px; }
+.delivery-failed { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; color: var(--red); font-size: 12px; }
+.delivery-failed button { border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; background: var(--surface); cursor: pointer; }
+.file-search-results p { margin: 12px; color: var(--muted); font-size: 12px; }
+button:focus-visible, a:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+@media (max-height: 500px) {
+  .chat-main.is-empty .composer-wrap { bottom: 0; transform: none; }
+  .empty-chat { padding-bottom: 140px; }
+  .empty-chat h1 { font-size: 20px; }
+  .empty-logo, .empty-chat p { display: none; }
+  .composer textarea { max-height: 80px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}

@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import crypto from "node:crypto";
 
 const hidden = new Set([".git", "node_modules", "dist", "build", ".next", "coverage"]);
 const MAX_TEXT_FILE_SIZE = 10 * 1024 * 1024;
@@ -24,6 +25,15 @@ export class WorkspaceFs {
   get path() { return this.root; }
   get basePath() { return this.base; }
   get isSelected() { return this.selected; }
+
+  /** An immutable request scope; never change another browser's workspace. */
+  async scoped(candidate: string) {
+    const resolved = await fs.realpath(candidate);
+    if (!this.inside(this.base, resolved)) throw new Error("Workspace is outside the browsable root");
+    const scope = new WorkspaceFs(resolved, this.base, true);
+    await scope.init();
+    return scope;
+  }
 
   private inside(parent: string, candidate: string) {
     const relative = path.relative(parent, candidate);
@@ -90,7 +100,7 @@ export class WorkspaceFs {
     if (stat.size > MAX_TEXT_FILE_SIZE) return { path: relative, size: stat.size, previewable: false, reason: "Text file exceeds 10 MB preview limit" };
     const buffer = await fs.readFile(file);
     if (buffer.subarray(0, 8000).includes(0)) return { path: relative, size: stat.size, previewable: false, reason: "Binary content cannot be previewed as text" };
-    return { path: relative, content: buffer.toString("utf8"), size: stat.size, previewable: true, kind: "text" as const, mime: "text/plain; charset=utf-8" };
+    return { path: relative, content: buffer.toString("utf8"), revision: crypto.createHash("sha256").update(buffer).digest("hex"), size: stat.size, previewable: true, kind: "text" as const, mime: "text/plain; charset=utf-8" };
   }
 
   /** Resolve a regular workspace file for an HTTP download without reading it into memory. */
@@ -101,14 +111,38 @@ export class WorkspaceFs {
     return { path: file, name: path.basename(file), size: stat.size, mime: imageMime.get(path.extname(file).toLowerCase()) || "application/octet-stream" };
   }
 
-  async write(relative: string, content: string) {
+  async write(relative: string, content: string, revision?: string) {
     if (Buffer.byteLength(content, "utf8") > MAX_TEXT_FILE_SIZE) throw new Error("File exceeds 10 MB edit limit");
     const file = await this.safe(relative);
     const stat = await fs.stat(file);
     if (!stat.isFile()) throw new Error("Not a file");
     if (!canPreviewText(file)) throw new Error("Only common text and code files can be edited");
-    await fs.writeFile(file, content, "utf8");
+    if (revision && crypto.createHash("sha256").update(await fs.readFile(file)).digest("hex") !== revision) throw new Error("File changed on disk. Reopen it before saving to avoid overwriting newer changes.");
+    const temporary = path.join(path.dirname(file), `.codex-web-${crypto.randomUUID()}.tmp`);
+    try { await fs.writeFile(temporary, content, { encoding: "utf8", flag: "wx", mode: stat.mode }); await fs.rename(temporary, file); }
+    finally { await fs.rm(temporary, { force: true }); }
     return this.read(relative);
+  }
+
+  async search(query: string) {
+    const needle = query.trim().toLowerCase().slice(0, 200);
+    if (!needle) return { entries: [], truncated: false };
+    const pending = [""]; const entries: Array<{ name: string; path: string; type: "file" }> = [];
+    let scanned = 0; const deadline = Date.now() + 250;
+    while (pending.length) {
+      const relative = pending.shift()!;
+      try {
+        const directory = await fs.opendir(await this.safe(relative));
+        for await (const entry of directory) {
+          if (++scanned > 5000 || Date.now() > deadline || entries.length >= 100) return { entries, truncated: true };
+          if (hidden.has(entry.name) || entry.isSymbolicLink()) continue;
+          const name = path.posix.join(relative, entry.name);
+          if (entry.isDirectory()) pending.push(name);
+          else if (entry.isFile() && name.toLowerCase().includes(needle)) entries.push({ name: entry.name, path: name, type: "file" });
+        }
+      } catch { /* An inaccessible directory should not hide other matches. */ }
+    }
+    return { entries, truncated: false };
   }
 
   async upload(directory: string, name: string, encoded: string) {

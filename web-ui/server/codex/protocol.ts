@@ -8,7 +8,7 @@ export type JsonRpcMessage = {
 };
 export type ApprovalDecision = string | Record<string, unknown>;
 
-type TimedItem = { timestamp?: number; turnId?: string };
+type TimedItem = { timestamp?: number; turnId?: string; delta?: boolean };
 export type UiItem = TimedItem & (
   | { type: "user_message"; id: string; text: string; attachments?: Array<{ id?: string; name: string; mime?: string; kind: "image" | "audio" | "text" | "file"; data?: string; size?: number }>; attachmentThreadId?: string }
   | { type: "assistant_message"; id: string; text: string; streaming: boolean }

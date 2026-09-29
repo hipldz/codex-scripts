@@ -1,18 +1,18 @@
 import crypto from "node:crypto";
-import nodeFs from "node:fs/promises";
 import v8 from "node:v8";
 import { adapt, approval } from "./codex/event-adapter.js";
 import type { CodexClient } from "./codex/client.js";
 import { AttachmentStore, type AttachmentSummary, type IncomingAttachment } from "./attachments.js";
 import type { WorkspaceFs } from "./filesystem.js";
 import type { EventHub } from "./event-hub.js";
+import { HistoryReader, type HistoryEntry } from "./history.js";
+import { TurnQueue } from "./turn-queue.js";
+import { processTreeMemory } from "./resources.js";
 
 const sourceKinds = ["cli", "vscode", "exec", "appServer", "subAgent", "subAgentReview", "subAgentCompact", "subAgentThreadSpawn", "subAgentOther", "unknown"];
 const threadPermissionSettings = (permission: unknown) => permission === "full" ? { approvalPolicy: "never", sandbox: "danger-full-access" } : permission === "read-only" ? { approvalPolicy: "on-request", sandbox: "read-only" } : { approvalPolicy: "on-request", sandbox: "workspace-write" };
 const turnPermissionSettings = (permission: unknown, cwd: string) => permission === "full" ? { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } } : permission === "read-only" ? { approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false } } : { approvalPolicy: "on-request", sandboxPolicy: { type: "workspaceWrite", writableRoots: [cwd], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false } };
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : String(error);
-const HISTORY_PAGE_SIZE = 60;
-const MAX_HISTORY_ITEMS = 500;
 const WEB_UI_CONTEXT_PREFIX = "[Codex Web thread files]";
 const threadDirectory = (threadId: string) => `.files/${threadId}/`;
 const threadFileContext = (threadId: string, attachmentPaths: string[]) => `${WEB_UI_CONTEXT_PREFIX} This thread's ID is ${threadId}. Keep uploads and standalone files generated for this conversation directly in ${threadDirectory(threadId)} in the current project workspace; do not create input, output, uploads, images, or scratch subdirectories unless the user explicitly asks.${attachmentPaths.length ? ` This turn's uploaded files: ${attachmentPaths.map((file) => JSON.stringify(file)).join(", ")}. Read them from the workspace when needed.` : ""} Keep tool-managed originals and report final paths. Honor an explicit user-specified path. Keep requested project/source edits and required build outputs at their normal project paths. If saving an artifact fails, say so.`;
@@ -22,7 +22,6 @@ const visibleUserText = (value: unknown) => {
   return marker < 0 ? text : text.slice(0, marker).trimEnd();
 };
 const timestampMs = (value: unknown) => { const number = Number(value); return Number.isFinite(number) && number > 0 ? (number < 1e12 ? number * 1000 : number) : undefined; };
-const lastTurnIndex = (items: any[], turnId: string) => { for (let index = items.length - 1; index >= 0; index--) if (items[index]?.turnId === turnId) return index; return -1; };
 const threadSummary = (thread: any) => {
   if (!thread || typeof thread !== "object") return thread;
   const { turns: _turns, ...summary } = thread;
@@ -52,11 +51,6 @@ const runningTurn = (thread: any) => {
   return { running, turnId: running && turn?.status === "inProgress" ? turn.id : undefined };
 };
 
-async function processRss(pid?: number) {
-  if (!pid || process.platform !== "linux") return null;
-  try { const status = await nodeFs.readFile(`/proc/${pid}/status`, "utf8"); const value = status.match(/^VmRSS:\s+(\d+)\s+kB$/m); return value ? Number(value[1]) * 1024 : null; } catch { return null; }
-}
-
 export class CodexController {
   private pendingApprovals = new Map<string | number, { threadId?: string; item: any }>();
   private models: any[] = [];
@@ -66,18 +60,28 @@ export class CodexController {
   private activeThreadId = "";
   private activeTurns = new Map<string, string>();
   private runningThreads = new Set<string>();
-  private histories = new Map<string, any[]>();
+  private history: HistoryReader;
+  private queue: TurnQueue;
+  private resourceSample?: { at: number; value: any };
+  private resourceRequest?: Promise<any>;
+  private lifecycle?: Promise<any[]>;
+  private historyRequests = 0;
+  private historyTail: Promise<unknown> = Promise.resolve();
+  private fileRequests = 0;
 
   constructor(private codex: CodexClient, private fs: WorkspaceFs, private attachments: AttachmentStore, private events: EventHub, private meta: () => any) {
+    this.history = new HistoryReader(codex);
+    this.queue = new TurnQueue((msg, cancelled) => this.startTurn(msg, cancelled), (message) => this.events.push(message), Math.max(1, Math.min(4, Math.floor(Number(process.env.CODEX_WEB_MAX_TURNS)) || 1)), 8, () => [...this.runningThreads].filter((id) => !this.queue.status(id)).length);
     codex.on("status", (status) => {
+      if (status === "stopped" || status === "error") { this.runningThreads.clear(); this.activeTurns.clear(); this.pendingApprovals.clear(); this.busy = false; this.startedAt = null; void this.queue.reset(); }
       if (status === "ready") { this.startedAt ||= Date.now(); this.lastError = ""; }
-      this.events.push({ type: "status", ...this.meta(), codexStatus: status, runtime: this.runtime() });
+      this.events.push({ type: "status", codexStatus: status, runtime: this.runtime() });
     });
     codex.on("message", (message) => {
       const threadId = message.params?.threadId;
       if (threadId && message.method === "turn/started") { this.runningThreads.add(threadId); if (message.params?.turn?.id) this.activeTurns.set(threadId, message.params.turn.id); }
-      if (threadId && (message.method === "turn/completed" || message.method === "error")) { this.runningThreads.delete(threadId); this.activeTurns.delete(threadId); }
-      if (threadId && message.method === "thread/status/changed") { if (message.params?.status?.type === "active") this.runningThreads.add(threadId); else { this.runningThreads.delete(threadId); this.activeTurns.delete(threadId); } }
+      if (threadId && (message.method === "turn/completed" || (message.method === "error" && !message.params?.willRetry))) { this.runningThreads.delete(threadId); this.activeTurns.delete(threadId); this.queue.completed(threadId); }
+      if (threadId && message.method === "thread/status/changed") { if (message.params?.status?.type === "active") this.runningThreads.add(threadId); else { this.runningThreads.delete(threadId); this.activeTurns.delete(threadId); this.queue.pump(); } }
       this.busy = this.runningThreads.size > 0;
       const request = approval(message);
       if (request) { this.pendingApprovals.set(request.requestId, { threadId: message.params?.threadId, item: request }); this.events.push({ type: "items", threadId: message.params?.threadId, items: [request] }); return; }
@@ -86,7 +90,7 @@ export class CodexController {
     });
   }
 
-  runtime() { return { status: this.codex.status, pid: this.codex.pid || null, busy: this.busy, startedAt: this.startedAt, lastError: this.lastError }; }
+  runtime() { return { status: this.codex.status, pid: this.codex.pid || null, busy: this.busy || this.queue.size > 0, queued: this.queue.queued, maxConcurrentTurns: this.queue.concurrency, startedAt: this.startedAt, lastError: this.lastError }; }
 
   async start() {
     try { await this.codex.ensureStarted(); this.startedAt = Date.now(); }
@@ -94,7 +98,7 @@ export class CodexController {
   }
 
   async bootstrap() {
-    if (this.codex.status !== "ready") return { ready: false, stage: this.codex.status === "error" ? "error" : "starting", eventCursor: this.events.current, runtime: this.runtime(), meta: { ...this.meta(), codexStatus: this.codex.status } };
+    if (this.codex.status !== "ready") return { ready: false, stage: this.codex.status === "error" ? "error" : "starting", eventCursor: this.events.current, eventInstance: this.events.instance, runtime: this.runtime(), meta: { ...this.meta(), codexStatus: this.codex.status } };
     const eventCursor = this.events.current;
     const [modelResult, threadResult, defaults] = await Promise.all([
       this.models.length ? Promise.resolve({ data: this.models }) : this.codex.request("model/list", { limit: 50, includeHidden: false }),
@@ -102,7 +106,7 @@ export class CodexController {
       this.readModelDefaults(),
     ]);
     this.models = modelResult.data || this.models;
-    return { ready: true, stage: "ready", eventCursor, runtime: this.runtime(), meta: { ...this.meta(), codexStatus: this.codex.status }, models: this.models, ...defaults, threads: (threadResult.data || []).map(threadSummary), nextCursor: threadResult.nextCursor || null };
+    return { ready: true, stage: "ready", eventCursor, eventInstance: this.events.instance, runtime: this.runtime(), meta: { ...this.meta(), codexStatus: this.codex.status }, models: this.models, ...defaults, threads: (threadResult.data || []).map((thread: any) => ({ ...threadSummary(thread), queued: this.queue.status(thread.id)?.queued || false })), nextCursor: threadResult.nextCursor || null };
   }
 
   private async readModelDefaults(cwd?: string) {
@@ -121,15 +125,26 @@ export class CodexController {
       else if (thread.status) { this.runningThreads.delete(thread.id); this.activeTurns.delete(thread.id); }
     }
     this.busy = this.runningThreads.size > 0;
+    this.queue.pump();
     return result;
   }
 
-  private async threadItems(thread: any, attachmentSources = new Map<string, string>()) {
-    const result: any[] = []; const rawItems = (thread.turns || []).flatMap((turn: any) => (turn.items || []).map((item: any) => ({ turn, item }))).slice(-MAX_HISTORY_ITEMS);
+  private async threadItems(thread: any, rawItems: HistoryEntry[]) {
+    const result: any[] = [];
+    const sources: string[] = []; const seen = new Set<string>([thread.id]);
+    let parent = thread.forkedFromId;
+    while (parent && !seen.has(parent) && sources.length < 64) {
+      seen.add(parent); sources.push(parent);
+      try {
+        const source = (await this.codex.request("thread/read", { threadId: parent, includeTurns: false })).thread;
+        const scope = await this.fs.scoped(source.cwd); this.attachments.bindThread(parent, scope.path);
+        parent = source.forkedFromId;
+      } catch { break; }
+    }
     for (const { turn, item } of rawItems) {
       if (item.type === "userMessage") {
         let attachmentThreadId = thread.id; let stored = await this.attachments.load(thread.id, item.id, turn.id);
-        if (!stored) { const source = attachmentSources.get(item.id) || thread.forkedFromId; if (source) { stored = await this.attachments.load(source, item.id, turn.id); if (stored) attachmentThreadId = source; } }
+        if (!stored) for (const source of sources) { stored = await this.attachments.load(source, item.id, turn.id); if (stored) { attachmentThreadId = source; break; } }
         if (!stored) { const legacy = legacyMessage(item.content || []); if (legacy.attachments.length) try { stored = await this.attachments.save(thread.id, item.id, legacy.text, legacy.attachments); await this.attachments.setTurnId(thread.id, item.id, turn.id); } catch { /* keep original */ } }
         result.push({ type: "user_message", id: item.id, turnId: turn.id, timestamp: timestampMs(turn.startedAt), ...userMessage(item.content || [], stored), ...(stored ? { attachmentThreadId } : {}) });
       } else { const mapped = adapt({ method: "item/completed", params: { threadId: thread.id, turnId: turn.id, item } }); const timestamp = timestampMs(turn.completedAt ?? turn.startedAt); result.push(...(mapped?.items || []).map((entry) => ({ ...entry, turnId: turn.id, timestamp }))); }
@@ -137,61 +152,172 @@ export class CodexController {
     return result;
   }
 
-  async handle(msg: any): Promise<any[]> {
+  async workspaceFor(msg: { threadId?: string; workspace?: string }) {
+    const cwd = msg.threadId ? this.attachments.workspaceFor(msg.threadId) : msg.workspace || (this.fs.isSelected ? this.fs.path : "");
+    if (!cwd) throw new Error("Workspace is unavailable; reopen the session or choose a folder");
+    return this.fs.scoped(cwd);
+  }
+
+  private workspaceMeta(scope: WorkspaceFs) {
+    return { ...this.meta(), workspace: scope.path, workspaceBase: scope.basePath, workspaceSelected: true };
+  }
+
+  private async threadPage(thread: any, cursor?: string) {
+    const page = await this.history.read(thread, cursor);
+    const eventCursor = this.events.current;
+    return { items: await this.threadItems(thread, page.entries), historyCursor: page.cursor, hasEarlier: Boolean(page.cursor), eventCursor };
+  }
+
+  private async activate(result: any) {
+    const thread = result.thread; this.activeThreadId = thread.id;
+    let workspace: any;
     try {
-      if (msg.type === "thread.list") { const result = await this.listThreads(Boolean(msg.archived), typeof msg.cursor === "string" ? msg.cursor : null); return [{ type: "threads", archived: Boolean(msg.archived), append: Boolean(msg.cursor), threads: (result.data || []).map(threadSummary), nextCursor: result.nextCursor || null }]; }
+      const scope = await this.fs.scoped(thread.cwd);
+      this.attachments.bindThread(thread.id, scope.path);
+      if (thread.forkedFromId) this.attachments.bindThread(thread.forkedFromId, scope.path);
+      workspace = this.workspaceMeta(scope);
+    } catch (error) { workspace = { ...this.meta(), workspace: "", workspaceSelected: false, error: errorMessage(error) }; }
+    const turn = runningTurn(thread);
+    if (turn.running) this.runningThreads.add(thread.id); else { this.runningThreads.delete(thread.id); this.activeTurns.delete(thread.id); }
+    if (turn.turnId) this.activeTurns.set(thread.id, turn.turnId);
+    const page = await this.threadPage(thread);
+    const preview = await this.queue.preview(thread.id);
+    const pending = [...this.pendingApprovals.values()].filter((entry) => entry.threadId === thread.id).map((entry) => entry.item);
+    this.busy = this.runningThreads.size > 0;
+    return { type: "thread.active", thread: threadSummary(thread), workspace, ...page, items: [...page.items, ...(preview && !page.items.some((item) => item.id === preview.id) ? [preview] : []), ...pending], running: this.runningThreads.has(thread.id), queued: this.queue.status(thread.id)?.queued || false, turnId: this.activeTurns.get(thread.id), model: result.model, effort: result.reasoningEffort, eventInstance: this.events.instance };
+  }
+
+  private async startTurn(msg: any, cancelled: () => boolean) {
+    const threadId = msg.threadId; const messageId = msg.clientUserMessageId;
+    const cwd = this.attachments.workspaceFor(threadId);
+    if (!cwd) throw new Error("Thread workspace is unavailable; reopen the session");
+    if (cancelled()) throw new Error("Turn cancelled");
+    const persisted = msg.attachments?.length ? await this.attachments.save(threadId, messageId, msg.text, msg.attachments) : null;
+    let accepted = false;
+    try {
+      if (cancelled()) throw new Error("Turn cancelled");
+      const input: any[] = msg.text ? [{ type: "text", text: msg.text, text_elements: [] }] : [];
+      const paths = persisted?.paths || [];
+      for (const [index, attachment] of (persisted?.prepared || []).entries()) input.push(codexAttachmentInput(attachment, paths[index]));
+      input.push({ type: "text", text: threadFileContext(threadId, paths), text_elements: [] });
+      const result = await this.codex.request("turn/start", { threadId, input, clientUserMessageId: messageId, model: msg.model || null, effort: msg.effort || null, ...turnPermissionSettings(msg.permission, cwd), summary: "auto" });
+      accepted = true;
+      if (cancelled()) { await this.codex.request("turn/interrupt", { threadId, turnId: result.turn.id }).catch(() => {}); throw new Error("Turn interrupted"); }
+      const running = this.queue.status(threadId) !== null && result.turn.status !== "completed" && result.turn.status !== "failed" && result.turn.status !== "interrupted";
+      if (running) { this.runningThreads.add(threadId); this.activeTurns.set(threadId, result.turn.id); this.busy = true; }
+      if (persisted) await this.attachments.setTurnId(threadId, messageId, result.turn.id).catch(() => {});
+      return { type: "turn.accepted", running, threadId, turnId: result.turn.id, messageId, attachments: persisted?.attachments || [] };
+    } catch (error) { if (persisted && !accepted) await this.attachments.removeMessage(threadId, messageId); throw error; }
+  }
+
+  async handle(msg: any): Promise<any[]> {
+    if (!msg || typeof msg !== "object" || typeof msg.type !== "string") return [{ type: "error", message: "Invalid action" }];
+    const hydration = ["thread.resume", "thread.history", "thread.fork"].includes(msg.type);
+    let messages: any[];
+    if (hydration) {
+      if (this.historyRequests >= 4) return [{ type: "error", action: msg.type, requestId: msg.requestId, message: "History is busy loading; retry shortly" }];
+      this.historyRequests++;
+      const queuedAt = Date.now();
+      const work = this.historyTail.then(() => Date.now() - queuedAt > 30_000 ? [{ type: "error", message: "History is busy loading; retry shortly" }] : this.handleAction(msg)); this.historyTail = work.catch(() => {});
+      try { messages = await work; } finally { this.historyRequests--; }
+    } else if (["fs.read", "fs.write", "fs.upload"].includes(msg.type)) {
+      if (this.fileRequests >= 2) messages = [{ type: "error", error: "File service is busy; retry shortly", message: "File service is busy; retry shortly" }];
+      else { this.fileRequests++; try { messages = await this.handleAction(msg); } finally { this.fileRequests--; } }
+    } else messages = await this.handleAction(msg);
+    return messages.map((message) => ({ ...message, requestId: message.requestId ?? msg.requestId, action: message.action ?? msg.type, requestThreadId: msg.threadId }));
+  }
+
+  private async handleAction(msg: any): Promise<any[]> {
+    try {
+      if (msg.type === "thread.list") { const result = await this.listThreads(Boolean(msg.archived), typeof msg.cursor === "string" ? msg.cursor : null); return [{ type: "threads", archived: Boolean(msg.archived), append: Boolean(msg.cursor), refresh: Boolean(msg.refresh), threads: (result.data || []).map((thread: any) => ({ ...threadSummary(thread), queued: this.queue.status(thread.id)?.queued || false })), nextCursor: result.nextCursor || null }]; }
       if (msg.type === "model.list") { const [result, defaults] = await Promise.all([this.codex.request("model/list", { limit: 50, includeHidden: false }), this.readModelDefaults(this.fs.isSelected ? this.fs.path : undefined)]); this.models = result.data || []; return [{ type: "models", models: this.models, ...defaults }]; }
-      if (msg.type === "thread.create") { if (!this.fs.isSelected) throw new Error("Choose a workspace before starting a thread"); const result = await this.codex.request("thread/start", { cwd: this.fs.path, model: msg.model || null, ...threadPermissionSettings(msg.permission), experimentalRawEvents: false }); this.attachments.bindThread(result.thread.id, result.thread.cwd || this.fs.path); this.activeThreadId = result.thread.id; this.histories.set(result.thread.id, []); const thread = threadSummary(result.thread); return [{ type: "thread.active", thread, workspace: this.meta(), items: [], historyCursor: 0, hasEarlier: false, model: result.model, effort: result.reasoningEffort }, { type: "thread.changed", thread }]; }
-      if (msg.type === "thread.resume") {
-        const result = await this.codex.request("thread/resume", { threadId: msg.threadId });
+      if (msg.type === "thread.create") {
+        const scope = await this.workspaceFor({ workspace: msg.workspace });
+        const result = await this.codex.request("thread/start", { cwd: scope.path, model: msg.model || null, ...threadPermissionSettings(msg.permission), experimentalRawEvents: false });
+        this.attachments.bindThread(result.thread.id, result.thread.cwd || scope.path);
         this.activeThreadId = result.thread.id;
-        let workspaceError = "";
-        if (result.thread?.cwd) try { await this.fs.selectAbsolute(result.thread.cwd); this.attachments.bindThread(result.thread.id, this.fs.path); } catch (error) { workspaceError = errorMessage(error); }
-        const history = await this.threadItems(result.thread);
-        this.histories.set(result.thread.id, history);
-        const start = Math.max(0, history.length - HISTORY_PAGE_SIZE);
-        const pending = [...this.pendingApprovals.values()].filter((entry) => entry.threadId === result.thread.id).map((entry) => entry.item);
-        const turn = runningTurn(result.thread);
-        if (turn.running) this.runningThreads.add(result.thread.id); else { this.runningThreads.delete(result.thread.id); this.activeTurns.delete(result.thread.id); }
-        if (turn.turnId) this.activeTurns.set(result.thread.id, turn.turnId);
-        this.busy = this.runningThreads.size > 0;
-        return [{ type: "thread.active", thread: threadSummary(result.thread), running: turn.running, turnId: this.activeTurns.get(result.thread.id), workspace: { ...this.meta(), error: workspaceError }, items: [...history.slice(start), ...pending], historyCursor: start, hasEarlier: start > 0, model: result.model, effort: result.reasoningEffort }];
+        const thread = threadSummary(result.thread);
+        return [{ type: "thread.active", thread, workspace: this.workspaceMeta(scope), items: [], historyCursor: null, hasEarlier: false, model: result.model, effort: result.reasoningEffort }, { type: "thread.changed", thread }];
       }
-      if (msg.type === "thread.fork") { const lastTurnId = typeof msg.turnId === "string" ? msg.turnId.trim() : ""; if (!lastTurnId) throw new Error("Choose a Codex response to branch from"); const sourceHistory = this.histories.get(String(msg.threadId || "")) || []; const boundary = lastTurnIndex(sourceHistory, lastTurnId); const branchHistory = boundary >= 0 ? sourceHistory.slice(0, boundary + 1) : sourceHistory; const attachmentSources = new Map(branchHistory.filter((item) => item.type === "user_message" && item.attachmentThreadId).map((item) => [item.id, item.attachmentThreadId])); const result = await this.codex.request("thread/fork", { threadId: msg.threadId, lastTurnId, excludeTurns: false }); this.activeThreadId = result.thread.id; let workspaceError = ""; if (result.thread?.cwd) try { await this.fs.selectAbsolute(result.thread.cwd); this.attachments.bindThread(result.thread.id, this.fs.path); } catch (error) { workspaceError = errorMessage(error); } await Promise.allSettled(branchHistory.filter((item) => item.type === "user_message" && item.attachments?.length).map((item) => this.attachments.cloneMessage(item.attachmentThreadId || msg.threadId, result.thread.id, item.id))); const history = await this.threadItems(result.thread, attachmentSources); this.histories.set(result.thread.id, history); const start = Math.max(0, history.length - HISTORY_PAGE_SIZE); const thread = threadSummary(result.thread); return [{ type: "thread.active", thread, workspace: { ...this.meta(), error: workspaceError }, items: history.slice(start), historyCursor: start, hasEarlier: start > 0, model: result.model, effort: result.reasoningEffort }, { type: "thread.changed", thread }]; }
-      if (msg.type === "thread.history") { const history = this.histories.get(String(msg.threadId || "")) || []; const before = Math.min(history.length, Math.max(0, Number(msg.before) || 0)); const start = Math.max(0, before - HISTORY_PAGE_SIZE); return [{ type: "history.items", threadId: msg.threadId, items: history.slice(start, before), historyCursor: start, hasEarlier: start > 0 }]; }
-      if (msg.type === "thread.archive") { await this.codex.request("thread/archive", { threadId: msg.threadId }); if (this.activeThreadId === msg.threadId) this.activeThreadId = ""; return [{ type: "thread.mutated", action: "archive", threadId: msg.threadId }]; }
+      if (msg.type === "thread.resume") return [await this.activate(await this.codex.request("thread/resume", { threadId: msg.threadId, excludeTurns: true }))];
+      if (msg.type === "thread.fork") {
+        const lastTurnId = typeof msg.turnId === "string" ? msg.turnId.trim() : "";
+        if (!lastTurnId) throw new Error("Choose a Codex response to branch from");
+        const result = await this.codex.request("thread/fork", { threadId: msg.threadId, lastTurnId, excludeTurns: true });
+        return [await this.activate(result), { type: "thread.changed", thread: threadSummary(result.thread) }];
+      }
+      if (msg.type === "thread.history") {
+        const result = await this.codex.request("thread/read", { threadId: msg.threadId, includeTurns: false });
+        return [{ type: "history.items", threadId: msg.threadId, ...await this.threadPage(result.thread, msg.before) }];
+      }
+      if (msg.type === "thread.archive") { if (this.queue.status(msg.threadId) || this.runningThreads.has(msg.threadId)) throw new Error("Stop the task before archiving this thread"); await this.codex.request("thread/archive", { threadId: msg.threadId }); if (this.activeThreadId === msg.threadId) this.activeThreadId = ""; return [{ type: "thread.mutated", action: "archive", threadId: msg.threadId }]; }
       if (msg.type === "thread.unarchive") { const result = await this.codex.request("thread/unarchive", { threadId: msg.threadId }); return [{ type: "thread.mutated", action: "unarchive", threadId: msg.threadId, thread: threadSummary(result.thread) }]; }
-      if (msg.type === "thread.delete") { await this.codex.request("thread/delete", { threadId: msg.threadId }); await this.attachments.removeThread(String(msg.threadId || "")); if (this.activeThreadId === msg.threadId) this.activeThreadId = ""; return [{ type: "thread.mutated", action: "delete", threadId: msg.threadId }]; }
+      if (msg.type === "thread.delete") { if (this.queue.status(msg.threadId) || this.runningThreads.has(msg.threadId)) throw new Error("Stop the task before deleting this thread"); await this.codex.request("thread/delete", { threadId: msg.threadId }); await this.attachments.removeThread(String(msg.threadId || "")); if (this.activeThreadId === msg.threadId) this.activeThreadId = ""; return [{ type: "thread.mutated", action: "delete", threadId: msg.threadId }]; }
       if (msg.type === "turn.send") {
-        const text = String(msg.text || "").trim(); const inputs = Array.isArray(msg.attachments) ? msg.attachments.slice(0, 4) : []; if (!text && !inputs.length) return [];
+        if (this.codex.status !== "ready") throw new Error("Codex is not ready");
+        const text = String(msg.text || "").trim(); const inputs = Array.isArray(msg.attachments) ? msg.attachments : [];
+        if (!text && !inputs.length) return [];
+        if (inputs.length > 4) throw new Error("At most four attachments are allowed");
         const threadId = String(msg.threadId || "");
-        if (this.runningThreads.has(threadId) || this.activeTurns.has(threadId)) throw new Error("This thread is still running; stop or wait for the current turn");
-        const cwd = this.attachments.workspaceFor(threadId);
-        if (!cwd) throw new Error("Thread workspace is unavailable; resume the thread before sending");
         const messageId = typeof msg.clientUserMessageId === "string" && /^[A-Za-z0-9_-]{1,160}$/.test(msg.clientUserMessageId) ? msg.clientUserMessageId : crypto.randomUUID();
-        const persisted = inputs.length ? await this.attachments.save(threadId, messageId, text, inputs as IncomingAttachment[]) : null;
-        const input: any[] = text ? [{ type: "text", text, text_elements: [] }] : [];
-        const attachmentPaths = persisted?.paths || [];
-        for (const [index, attachment] of (persisted?.prepared || []).entries()) input.push(codexAttachmentInput(attachment, attachmentPaths[index]));
-        input.push({ type: "text", text: threadFileContext(threadId, attachmentPaths), text_elements: [] });
-        try { const result = await this.codex.request("turn/start", { threadId, input, clientUserMessageId: messageId, model: msg.model || null, effort: msg.effort || null, ...turnPermissionSettings(msg.permission, cwd), summary: "auto" }); this.runningThreads.add(threadId); this.activeTurns.set(threadId, result.turn.id); this.busy = true; if (persisted) await this.attachments.setTurnId(threadId, messageId, result.turn.id); return [{ type: "turn.accepted", threadId, turnId: result.turn.id, messageId, attachments: persisted?.attachments || [] }]; }
-        catch (error) { if (persisted) await this.attachments.removeMessage(threadId, messageId); throw error; }
+        const receipt = this.queue.receipt(threadId, messageId); if (receipt) return [receipt];
+        if (this.runningThreads.has(threadId) || this.activeTurns.has(threadId)) throw new Error("This thread is still running; stop or wait for the current turn");
+        if (!this.attachments.workspaceFor(threadId)) throw new Error("Thread workspace is unavailable; resume the thread before sending");
+        return [await this.queue.submit({ ...msg, text, threadId, clientUserMessageId: messageId })];
       }
-      if (msg.type === "turn.interrupt") { const turnId = msg.turnId || this.activeTurns.get(String(msg.threadId || "")); if (!turnId) throw new Error("Active turn ID is unavailable; reopen the thread and try again"); await this.codex.request("turn/interrupt", { threadId: msg.threadId, turnId }); return []; }
-      if (msg.type === "approval.respond") { this.pendingApprovals.delete(msg.requestId); this.codex.respond(msg.requestId, { decision: msg.decision }); return []; }
-      if (msg.type === "fs.list") return [{ type: "fs.entries", path: msg.path || "", entries: await this.fs.list(msg.path || "") }];
-      if (msg.type === "fs.read") return [{ type: "fs.file", path: msg.path, file: await this.fs.read(msg.path) }];
-      if (msg.type === "fs.write") return [{ type: "fs.saved", path: msg.path, file: await this.fs.write(msg.path, String(msg.content ?? "")) }];
-      if (msg.type === "fs.create") return [{ type: "fs.created", requestId: msg.requestId, file: await this.fs.create(String(msg.directory || ""), String(msg.name || "")) }];
-      if (msg.type === "fs.delete") return [{ type: "fs.deleted", requestId: msg.requestId, file: await this.fs.delete(String(msg.path || "")) }];
-      if (msg.type === "fs.upload") return [{ type: "fs.uploaded", requestId: msg.requestId, file: await this.fs.upload(String(msg.directory || ""), String(msg.name || ""), String(msg.data || "")) }];
+      if (msg.type === "turn.interrupt") {
+        const threadId = String(msg.threadId || "");
+        if (await this.queue.cancel(threadId)) return [];
+        let turnId = this.activeTurns.get(threadId) || msg.turnId;
+        if (!turnId) {
+          try { const turns = await this.codex.request("thread/turns/list", { threadId, limit: 1, sortDirection: "desc" }); turnId = turns.data?.find((turn: any) => turn.status === "inProgress")?.id; }
+          catch (error) {
+            if ((error as any)?.code !== -32601 && !/unknown.*(method|variant)|method.*(not found|unsupported)/i.test(String(error))) throw error;
+            const result = await this.codex.request("thread/read", { threadId, includeTurns: true }); turnId = runningTurn(result.thread).turnId;
+          }
+        }
+        if (!turnId) throw new Error("No active turn to stop. Reopen the session to refresh its state.");
+        await this.codex.request("turn/interrupt", { threadId, turnId }); return [];
+      }
+      if (msg.type === "approval.respond") {
+        const entry = this.pendingApprovals.get(msg.approvalId);
+        if (!entry || entry.threadId !== msg.threadId) throw new Error("This approval is no longer pending in this thread");
+        if (!entry.item.decisions.some((decision: any) => JSON.stringify(decision) === JSON.stringify(msg.decision))) throw new Error("Invalid approval decision");
+        this.codex.respond(msg.approvalId, { decision: msg.decision }); this.pendingApprovals.delete(msg.approvalId);
+        const key = typeof msg.decision === "string" ? msg.decision : Object.keys(msg.decision)[0];
+        const result = { type: "items", threadId: msg.threadId, items: [{ ...entry.item, status: key === "decline" || key === "cancel" ? "denied" : "approved" }] };
+        this.events.push(result); return [result];
+      }
+      const scope = msg.type.startsWith("fs.") ? await this.workspaceFor(msg) : this.fs;
+      if (msg.type === "fs.list") return [{ type: "fs.entries", path: msg.path || "", entries: await scope.list(msg.path || "") }];
+      if (msg.type === "fs.search") return [{ type: "fs.search", ...await scope.search(String(msg.query || "")) }];
+      if (msg.type === "fs.read") return [{ type: "fs.file", path: msg.path, file: await scope.read(msg.path) }];
+      if (msg.type === "fs.write") return [{ type: "fs.saved", path: msg.path, file: await scope.write(msg.path, String(msg.content ?? ""), msg.revision) }];
+      if (msg.type === "fs.create") return [{ type: "fs.created", requestId: msg.requestId, file: await scope.create(String(msg.directory || ""), String(msg.name || "")) }];
+      if (msg.type === "fs.delete") return [{ type: "fs.deleted", requestId: msg.requestId, file: await scope.delete(String(msg.path || "")) }];
+      if (msg.type === "fs.upload") return [{ type: "fs.uploaded", requestId: msg.requestId, file: await scope.upload(String(msg.directory || ""), String(msg.name || ""), String(msg.data || "")) }];
       if (msg.type === "workspace.list") return [{ type: "workspace.entries", path: msg.path || "", entries: await this.fs.listWorkspaces(msg.path || ""), base: this.fs.basePath, current: this.fs.path }];
-      if (msg.type === "workspace.select") { const selected = await this.fs.select(msg.path || ""); const defaults = await this.readModelDefaults(this.fs.path); return [{ type: "workspace.selected", ...selected, ...this.meta(), ...defaults }]; }
-      if (msg.type === "system.usage") { const memory = process.memoryUsage(); const codexRss = await processRss(this.codex.pid); return [{ type: "system.usage", usage: { rss: memory.rss, heapUsed: memory.heapUsed, heapTotal: memory.heapTotal, heapLimit: v8.getHeapStatistics().heap_size_limit, external: memory.external, codexRss, totalRss: memory.rss + (codexRss || 0), uptime: process.uptime(), clients: 1 } }]; }
+      if (msg.type === "workspace.select") { const selectedScope = await this.fs.scoped(this.fs.basePath); const selected = await selectedScope.select(msg.path || ""); const defaults = await this.readModelDefaults(selectedScope.path); return [{ type: "workspace.selected", ...selected, ...this.workspaceMeta(selectedScope), ...defaults }]; }
+      if (msg.type === "system.usage") {
+        if (!this.resourceSample || Date.now() - this.resourceSample.at > 2000) {
+          this.resourceRequest ||= processTreeMemory(process.pid, this.codex.pid).then((tree) => {
+            const memory = process.memoryUsage();
+            this.resourceSample = { at: Date.now(), value: { rss: memory.rss, heapUsed: memory.heapUsed, heapTotal: memory.heapTotal, heapLimit: v8.getHeapStatistics().heap_size_limit, external: memory.external, ...tree, totalRss: memory.rss + (tree.codexRss || 0) + (tree.childRss || 0), uptime: process.uptime(), eventBytes: this.events.retainedBytes, queued: this.queue.queued } };
+          }).finally(() => { this.resourceRequest = undefined; });
+          await this.resourceRequest;
+        }
+        return [{ type: "system.usage", usage: this.resourceSample!.value }];
+      }
       if (msg.type === "account.usage") { const [usage, limits] = await Promise.allSettled([this.codex.request("account/usage/read"), this.codex.request("account/rateLimits/read")]); return [{ type: "account.usage", usage: usage.status === "fulfilled" ? usage.value : null, rateLimits: limits.status === "fulfilled" ? limits.value : null, unavailable: usage.status === "rejected" && limits.status === "rejected" }]; }
-      if (msg.type === "runtime.restart") { const active = this.activeThreadId; await this.codex.stop(); this.startedAt = null; this.models = []; await this.start(); const boot: any = await this.bootstrap(); const restored = active ? await this.handle({ type: "thread.resume", threadId: active }) : []; return [{ type: "status", ...this.meta(), codexStatus: this.codex.status, runtime: this.runtime() }, { type: "models", models: boot.models || [], defaultModel: boot.defaultModel || "", defaultEffort: boot.defaultEffort || "" }, ...restored]; }
-      if (msg.type === "runtime.stop") { await this.codex.stop(); return [{ type: "status", ...this.meta(), codexStatus: this.codex.status, runtime: this.runtime() }]; }
-      if (msg.type === "runtime.start") { await this.start(); return [{ type: "status", ...this.meta(), codexStatus: this.codex.status, runtime: this.runtime() }]; }
+      if (["runtime.restart", "runtime.stop", "runtime.start"].includes(msg.type)) {
+        if (this.lifecycle) throw new Error("A runtime operation is already in progress");
+        this.lifecycle = (async () => {
+          if (msg.type !== "runtime.start") { await this.codex.stop(); await this.queue.reset(); this.runningThreads.clear(); this.activeTurns.clear(); this.pendingApprovals.clear(); this.busy = false; this.startedAt = null; this.models = []; }
+          if (msg.type !== "runtime.stop") await this.start();
+          return [{ type: "status", codexStatus: this.codex.status, runtime: this.runtime() }];
+        })();
+        try { return await this.lifecycle; } finally { this.lifecycle = undefined; }
+      }
       throw new Error(`Unsupported action: ${msg.type || "unknown"}`);
     } catch (error) {
       const message = errorMessage(error);
@@ -202,7 +328,7 @@ export class CodexController {
       if (msg.type === "fs.create") return [{ type: "fs.created", requestId: msg.requestId, error: message }];
       if (msg.type === "fs.delete") return [{ type: "fs.deleted", requestId: msg.requestId, error: message }];
       if (msg.type === "workspace.list") return [{ type: "workspace.entries", path: msg.path || "", entries: [], error: message, base: this.fs.basePath, current: this.fs.path }];
-      return [{ type: "error", requestId: msg.requestId, message }];
+      return [{ type: "error", requestId: msg.requestId, threadId: msg.threadId, messageId: msg.clientUserMessageId, message }];
     }
   }
 }

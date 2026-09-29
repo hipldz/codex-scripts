@@ -29,7 +29,7 @@ const itemActivity = (item: any, done: boolean): UiItem[] => {
 export function adapt(message: JsonRpcMessage): { threadId?: string; items?: UiItem[]; running?: boolean; turnId?: string; threadStatus?: { type: string; activeFlags?: string[] }; diff?: string; tokenUsage?: any; compaction?: { status: "running" | "completed"; at?: number } } | null {
   const p = message.params || {}; const item = p.item || {};
   if (message.method === "thread/status/changed") return { threadId: p.threadId, threadStatus: p.status };
-  if (message.method === "turn/diff/updated") return { threadId: p.threadId, turnId: p.turnId, diff: p.diff || "" };
+  if (message.method === "turn/diff/updated") return { threadId: p.threadId, turnId: p.turnId, diff: clip(p.diff || "", MAX_DIFF_OUTPUT) };
   if (message.method === "thread/tokenUsage/updated") return { threadId: p.threadId, turnId: p.turnId, tokenUsage: p.tokenUsage };
   if (message.method === "thread/compacted") return { threadId: p.threadId, turnId: p.turnId, compaction: { status: "completed", at: Date.now() }, items: [status(`compaction-${p.turnId}`, "Context automatically compacted", "Older conversation context was summarized.", "success")] };
   if (message.method === "turn/plan/updated") return { threadId: p.threadId, turnId: p.turnId, items: [status(`plan-${p.turnId}`, "Plan updated", (p.plan || []).map((step: any) => `${step.status === "completed" ? "✓" : step.status === "in_progress" ? "•" : "○"} ${step.step}`).join("\n"))] };
@@ -37,14 +37,15 @@ export function adapt(message: JsonRpcMessage): { threadId?: string; items?: UiI
   if (message.method === "model/rerouted") return { threadId: p.threadId, turnId: p.turnId, items: [status(`reroute-${p.turnId}`, `Model switched to ${p.toModel}`, p.reason, "warning")] };
   if (message.method === "model/safetyBuffering/updated" && p.showBufferingUi) return { threadId: p.threadId, turnId: p.turnId, items: [status(`buffering-${p.turnId}`, "Response is being safety checked", p.reasons?.join(" · ") || "Codex will continue when ready.")] };
   if (message.method === "warning" || message.method === "guardianWarning" || message.method === "configWarning") return { threadId: p.threadId, turnId: p.turnId, items: [status(`warning-${Date.now()}`, "Codex warning", p.message || p.warning || details(p), "warning")] };
-  if (message.method === "item/agentMessage/delta") return { threadId: p.threadId, items: [{ type: "assistant_message", id: p.itemId, text: p.delta || "", streaming: true }] };
-  if (message.method === "item/reasoning/summaryTextDelta" || message.method === "item/reasoning/textDelta") return { threadId: p.threadId, items: [{ type: "thinking", id: p.itemId, text: p.delta || "", status: "running" }] };
+  if (message.method === "item/agentMessage/delta") return { threadId: p.threadId, items: [{ type: "assistant_message", id: p.itemId, text: p.delta || "", streaming: true, delta: true }] };
+  if (message.method === "item/reasoning/summaryTextDelta" || message.method === "item/reasoning/textDelta") return { threadId: p.threadId, items: [{ type: "thinking", id: p.itemId, text: p.delta || "", status: "running", delta: true }] };
   if (message.method === "item/commandExecution/outputDelta") return { threadId: p.threadId, items: [{ type: "command", id: p.itemId, command: "", output: p.delta || "", status: "running" }] };
   if (message.method === "item/mcpToolCall/progress") return { threadId: p.threadId, items: [{ type: "command", id: p.itemId, command: "", output: p.message || "", status: "running" }] };
   if (message.method === "item/fileChange/outputDelta") return { threadId: p.threadId, items: [{ type: "command", id: p.itemId, command: "Editing files", output: p.delta || "", status: "running" }] };
   if (message.method === "item/fileChange/patchUpdated") return { threadId: p.threadId, items: (p.changes || []).map((c: any, i: number) => ({ type: "file_change", id: `${p.itemId}-${i}`, path: pathFor(c), diff: diffFor([c]), status: "running" })) };
   if (message.method === "turn/started") return { threadId: p.threadId, running: true, turnId: p.turn?.id };
   if (message.method === "turn/completed") return { threadId: p.threadId, running: false, turnId: p.turn?.id };
+  if (message.method === "error" && p.willRetry) return { threadId: p.threadId, items: [status(`retry-${p.turnId}`, "Retrying connection", p.error?.message || p.message, "warning")] };
   if (message.method === "error") return { threadId: p.threadId, running: false, items: [{ type: "error", id: `error-${Date.now()}`, message: p.error?.message || p.message || "Codex error" }] };
   if (message.method === "item/started" || message.method === "item/completed") {
     const done = message.method === "item/completed";

@@ -5,6 +5,7 @@ import type { JsonRpcId, JsonRpcMessage } from "./protocol.js";
 
 export class CodexClient extends EventEmitter {
   private child?: ChildProcessWithoutNullStreams;
+  private starting?: Promise<void>;
   private id = 0;
   private pending = new Map<JsonRpcId, { resolve: (value: any) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
   status: "starting" | "ready" | "error" | "stopped" = "stopped";
@@ -13,7 +14,14 @@ export class CodexClient extends EventEmitter {
   constructor(private cwd: string) { super(); }
   get pid() { return this.child?.pid; }
 
-  async start() {
+  start(): Promise<void> {
+    if (this.status === "ready") return Promise.resolve();
+    if (this.starting) return this.starting;
+    this.starting = this.startProcess().finally(() => { this.starting = undefined; });
+    return this.starting;
+  }
+
+  private async startProcess() {
     if (this.status === "ready") return;
     if (this.status === "starting") throw new Error("Codex app-server is already starting");
     this.status = "starting";
@@ -24,10 +32,15 @@ export class CodexClient extends EventEmitter {
     const args = process.platform === "win32"
       ? ["/d", "/s", "/c", "codex", "app-server", "--stdio"]
       : ["app-server", "--stdio"];
-    const child = spawn(command, args, { cwd: this.cwd, env: process.env }); this.child = child;
+    const child = spawn(command, args, { cwd: this.cwd, env: process.env, windowsHide: true }); this.child = child;
     const lines = readline.createInterface({ input: child.stdout });
     lines.on("line", (line) => { if (this.child !== child) return; try { this.handle(JSON.parse(line)); } catch { this.emit("warning", `Malformed app-server message: ${line.slice(0, 100)}`); } });
     child.stderr.on("data", (chunk) => this.emit("stderr", chunk.toString()));
+    child.stdin.on("error", (error) => {
+      if (this.child !== child) return;
+      for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(error); }
+      this.pending.clear();
+    });
     child.on("error", (error) => {
       if (this.child !== child) return;
       this.status = "error";
@@ -44,10 +57,11 @@ export class CodexClient extends EventEmitter {
     });
     try {
       const info = await this.request("initialize", { clientInfo: { name: "codex-web-harness", title: "Codex Web", version: "0.1.0" }, capabilities: { experimentalApi: true, requestAttestation: false } });
+      if (this.child !== child) throw new Error("Codex startup was cancelled");
       this.notify("initialized", {});
       this.userAgent = info.userAgent || this.userAgent;
       this.status = "ready"; this.emit("status", this.status);
-    } catch (error) { this.status = "error"; this.emit("status", this.status); throw error; }
+    } catch (error) { if (this.child === child) { await this.stop(); this.status = "error"; this.emit("status", this.status); } throw error; }
   }
 
   async ensureStarted() { if (this.status !== "ready") await this.start(); }
@@ -56,7 +70,7 @@ export class CodexClient extends EventEmitter {
     if (message.id !== undefined && (message.result !== undefined || message.error)) {
       const pending = this.pending.get(message.id); if (!pending) return;
       this.pending.delete(message.id); clearTimeout(pending.timer);
-      message.error ? pending.reject(new Error(message.error.message)) : pending.resolve(message.result);
+      message.error ? pending.reject(Object.assign(new Error(message.error.message), { code: message.error.code })) : pending.resolve(message.result);
       return;
     }
     this.emit("message", message);
@@ -67,6 +81,7 @@ export class CodexClient extends EventEmitter {
     this.child.stdin.write(`${JSON.stringify(message)}\n`);
   }
   request(method: string, params: Record<string, any> = {}) {
+    if (this.pending.size >= 64) return Promise.reject(new Error("Codex is busy; retry shortly"));
     const id = ++this.id;
     return new Promise<any>((resolve, reject) => {
       const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`${method} timed out`)); }, 60_000); timer.unref();

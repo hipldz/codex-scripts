@@ -253,7 +253,7 @@ Nginx 可以负责 TLS 和反向代理，但不能替代 Node。Node 仍需要�
 ```nginx
 location /codex/ {
     proxy_pass http://127.0.0.1:8765/codex/;
-    proxy_set_header Host $host;
+    proxy_set_header Host $http_host;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
 }
@@ -293,6 +293,14 @@ Files 只对常见纯文本和代码格式启用预览/编辑，例如 `.txt`、
 
 PNG、JPEG、GIF、WebP、SVG、BMP 和 AVIF 会直接显示图片预览并可下载。Word、PDF、Excel、压缩包和其他二进制/办公格式可以上传和保存在 workspace 中，但 Files 不会尝试解析或编辑，只显示文件大小、不可预览说明和下载入口。
 
+## 多标签页与文件保护
+
+文件 API 和下载/预览 URL 明确携带 thread 或 workspace 上下文，切换另一个标签页的会话不会修改当前标签页的操作目录。审批只展示在所属会话中，后端也检查审批的 thread 和可选决策。
+
+Files 搜索会查找子目录中的文件名/相对路径，跳过构建产物与符号链接；最多扫描 5000 个条目、返回 100 个结果，超过时间/数量预算时提示缩小搜索范围。切换文件、关闭抽屉、离开页面前会保护未保存编辑；保存时核对打开文件时的内容摘要，发现外部修改会拒绝覆盖。
+
+写接口仅接受 `application/json`，拒绝跨来源操作。反向代理需要保留浏览器的 Host（含非默认端口），如上面的 `$http_host`。文件内容使用独立的 CSP sandbox；HTML 等主动内容强制下载，SVG 可作为图片预览但不能执行脚本。
+
 ## Session URL
 
 打开或创建 session 成功后，浏览器地址会自动包含：
@@ -309,7 +317,7 @@ New thread 的默认模型与 reasoning effort 来自当前工作区生效的 `c
 
 ## 内存说明
 
-Node 不维护浏览器 WebSocket。浏览器在生成时高频拉取增量状态，空闲时自动降频，页面隐藏时降为 15 秒；提交新 turn 后会立即唤醒轮询。Session 列表从 app-server 分页加载，打开会话只返回最近 60 条 UI 消息，更早内容按需加载，Settings 关闭时不会持续读取资源数据。
+Node 不维护浏览器 WebSocket。浏览器在生成时高频拉取增量状态，空闲时自动降频，页面隐藏时降为 15 秒；提交新 turn 后会立即唤醒轮询。Session 列表从 app-server 分页加载，打开会话按每页 30 个原始 item 加载，更早内容按需加载，不再截断到最后 500 个 item，Settings 关闭时不会持续读取资源数据。
 
 会话 JSON 不包含 app-server 返回的原始 `turns`，工具输出和 diff 也有首包上限。生成图片通过受保护的图片 URL 单独读取，不会把 Base64 图片重复塞进会话响应。
 
@@ -323,7 +331,37 @@ Node 不维护浏览器 WebSocket。浏览器在生成时高频拉取增量状�
 
 RSS 包含 V8 之外的 Buffer 和原生内存，因此可能高于当前 heap usage。Codex app-server 是独立子进程，也会单独占用内存。
 
+### 2 核 2G 的默认运行策略
+
+- Web UI 默认同时执行 **1 个 turn**，最多再排队 **8 个**；可通过 `CODEX_WEB_MAX_TURNS=1..4` 调整并行数。排队内容暂存在系统临时目录，避免 Base64 附件常驻 Node 堆；启动执行或取消后清除。停止/重启 Codex 会取消队列，不会在服务重启后自动执行旧任务。强制杀进程可能留下 `codex-web-queue-*` 临时目录，可在确认服务已停止后清理。
+- 并行限制针对此 Web UI 提交的任务，并会等待已发现的外部运行会话；不能替代操作系统对其他 Codex 实例、编译器或 MCP 进程的资源限制。
+- Node 不缓存打开过的完整会话。优先使用 `thread/items/list` 分页读取；不支持该接口的旧版 Codex 回退到 `thread/read`。旧版上游仍可能一次返回完整历史，因此超长会话建议升级 Codex。历史恢复请求串行执行，限制排队数量。
+- 增量事件缓冲同时限制 **1000 条 / 8 MiB**，每次轮询通常最多读取 **512 KiB**（单条较大事件单独返回）。游标失效、缓冲溢出或服务重启时，会重新同步当前会话。切回前台立即轮询，失败后退避重连。
+- HTTP 请求体限制 16 MiB，大请求只允许 1 个同时处理；文件预览/写入/上传最多同时处理 2 个。繁忙时返回可重试错误，不无限堆积请求。
+- `npm run build` 预生成 Brotli/Gzip 静态文件，生产服务直接流式发送压缩产物，不在每次请求时消耗 CPU 压缩。旧构建没有压缩文件时自动使用原文件。
+- Linux 的 Resources 面板采样 Node、app-server 和仍在进程树中的工具/MCP 子进程 RSS，并展示事件缓冲占用。RSS 相加可能重复计算共享内存；已脱离进程树的服务不在统计中。Windows 无 `/proc`，子进程采样显示不可用。
+
+以上限制用于降低 Web UI 自身开销，不保证所有用户任务都能在 2G 内运行。尤其是项目构建、浏览器自动化和大型工具，仍应结合实际任务检查整机内存。
+
+### 长期运行
+
+已有后台脚本适合手动管理；需要崩溃恢复、开机启动和进程组资源限制时，可参考 `scripts/codex-web.service.example` 配置 Linux 用户级 systemd 服务。示例中的路径和 Node 路径需按机器调整；不与后台脚本同时启动同一端口。
+
+
 ## 验证
+
+不连接真实 Codex 的自动回归：
+
+```bash
+npm test
+npm run build
+python scripts/verify_regressions.py
+```
+
+浏览器回归需要 Python Playwright 和 Chromium；覆盖中文输入、发送失败、断线同步、审批隔离、文件搜索/编辑保护、手机与横屏布局。测试使用模拟 API，不会执行真实模型任务。截图保存在 `artifacts/regressions/`。
+
+分页参数参考上游 [ThreadItemsListParams](https://github.com/openai/codex/blob/main/codex-rs/app-server-protocol/schema/json/v2/ThreadItemsListParams.json) 和 [ThreadResumeParams](https://github.com/openai/codex/blob/main/codex-rs/app-server-protocol/schema/json/v2/ThreadResumeParams.json)。真实 CLI 兼容性与流式验证仍使用下面的脚本。
+
 
 先启动一个生产服务：
 

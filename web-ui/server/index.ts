@@ -11,6 +11,7 @@ import { CodexClient } from "./codex/client.js";
 import { AttachmentStore } from "./attachments.js";
 import { EventHub } from "./event-hub.js";
 import { CodexController } from "./controller.js";
+import { acceptedEncodings, actionRequestError, fileHeaders } from "./http-policy.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, "..");
@@ -54,17 +55,32 @@ const requireAuthorization = (res: http.ServerResponse) => {
 const sendJson = (res: http.ServerResponse, status: number, body: any) => { const data = Buffer.from(JSON.stringify(body)); res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Content-Length": data.length, "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" }); res.end(data); };
 const readJson = async (req: http.IncomingMessage) => { const chunks: Buffer[] = []; let size = 0; for await (const chunk of req) { const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk); size += data.length; if (size > 16 * 1024 * 1024) throw new Error("Request body exceeds 16 MB"); chunks.push(data); } return JSON.parse(Buffer.concat(chunks).toString("utf8")); };
 
+let largeActions = 0;
+let actionCount = 0;
 const server = http.createServer(async (req, res) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Referrer-Policy", "same-origin");
   if (!authorized(req)) return requireAuthorization(res);
-  const url = new URL(req.url || "/", "http://localhost");
+  let url: URL;
+  try { url = new URL(req.url || "/", "http://localhost"); } catch { res.writeHead(400); return res.end("Invalid URL"); }
   const prefix = config.basePath === "/" ? "" : config.basePath;
   if (prefix && url.pathname === prefix) { res.writeHead(308, { Location: `${prefix}/${url.search}` }); return res.end(); }
   if (prefix && !url.pathname.startsWith(`${prefix}/`)) { res.writeHead(404); return res.end("Not found"); }
   const localPath = url.pathname.slice(prefix.length) || "/";
   if (localPath === "/api/bootstrap" && req.method === "GET") { try { return sendJson(res, 200, await controller.bootstrap()); } catch (error) { return sendJson(res, 503, { ready: false, stage: "error", runtime: controller.runtime(), error: error instanceof Error ? error.message : String(error), meta: { ...meta(), codexStatus: codex.status } }); } }
-  if (localPath === "/api/events" && req.method === "GET") return sendJson(res, 200, events.read(Math.max(0, Number(url.searchParams.get("cursor") || 0))));
+  if (localPath === "/api/events" && req.method === "GET") return sendJson(res, 200, events.read(Number(url.searchParams.get("cursor") || 0), url.searchParams.get("instance") || undefined));
   if (localPath === "/api/runtime" && req.method === "GET") return sendJson(res, 200, controller.runtime());
-  if (localPath === "/api/actions" && req.method === "POST") { try { return sendJson(res, 200, { messages: await controller.handle(await readJson(req)) }); } catch (error) { return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) }); } }
+  if (localPath === "/api/actions" && req.method === "POST") {
+    const invalid = actionRequestError(req); if (invalid) return sendJson(res, invalid.status, { error: invalid.error });
+    const length = Number(req.headers["content-length"]);
+    if (length > 16 * 1024 * 1024) return sendJson(res, 413, { error: "Request body exceeds 16 MB" });
+    const large = !Number.isFinite(length) || length > 512 * 1024;
+    if (actionCount >= 16 || (large && largeActions >= 1)) { res.setHeader("Retry-After", "2"); return sendJson(res, 429, { error: "Server is busy handling uploads; retry shortly" }); }
+    actionCount++; if (large) largeActions++;
+    try { return sendJson(res, 200, { messages: await controller.handle(await readJson(req)) }); }
+    catch (error) { return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) }); }
+    finally { actionCount--; if (large) largeActions--; }
+  }
   const attachmentMatch = localPath.match(/^\/attachments\/([^/]+)\/([^/]+)\/([^/]+)$/);
   if (attachmentMatch) {
     let parts: string[];
@@ -72,17 +88,16 @@ const server = http.createServer(async (req, res) => {
     let download;
     try { download = await attachmentStore.resolveDownload(parts[0], parts[1], parts[2]); } catch { download = null; }
     if (!download) { res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" }); return res.end("Not found"); }
-    const disposition = url.searchParams.get("inline") === "1" ? "inline" : "attachment";
-    res.writeHead(200, { "Content-Type": download.mime, "Content-Length": download.size, "Content-Disposition": `${disposition}; filename*=UTF-8''${encodeURIComponent(download.name)}`, "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff" });
+    res.writeHead(200, fileHeaders(download, url.searchParams.get("inline") === "1"));
     createReadStream(download.path).on("error", () => { if (!res.headersSent) res.writeHead(404); res.end(); }).pipe(res);
     return;
   }
   if ((localPath === "/api/files/raw" || localPath === "/api/files/download") && req.method === "GET") {
     const relative = url.searchParams.get("path") || "";
     try {
-      const download = await workspaceFs.download(relative);
-      const disposition = localPath.endsWith("/download") ? `attachment; filename*=UTF-8''${encodeURIComponent(download.name)}` : `inline; filename*=UTF-8''${encodeURIComponent(download.name)}`;
-      res.writeHead(200, { "Content-Type": download.mime, "Content-Length": download.size, "Content-Disposition": disposition, "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff" });
+      const scope = await controller.workspaceFor({ threadId: url.searchParams.get("threadId") || undefined, workspace: url.searchParams.get("workspace") || undefined });
+      const download = await scope.download(relative);
+      res.writeHead(200, fileHeaders(download, localPath.endsWith("/raw")));
       createReadStream(download.path).on("error", () => res.end()).pipe(res);
     } catch { res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" }); res.end("Not found"); }
     return;
@@ -90,7 +105,7 @@ const server = http.createServer(async (req, res) => {
   if (localPath === "/api/generated-images/raw" && req.method === "GET") {
     try {
       const image = await generatedImage(url.searchParams.get("path") || "");
-      res.writeHead(200, { "Content-Type": image.mime, "Content-Length": image.size, "Content-Disposition": `inline; filename*=UTF-8''${encodeURIComponent(image.name)}`, "Cache-Control": "private, max-age=3600", "X-Content-Type-Options": "nosniff" });
+      res.writeHead(200, fileHeaders(image, true));
       createReadStream(image.path).on("error", () => res.end()).pipe(res);
     } catch { res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" }); res.end("Not found"); }
     return;
@@ -102,9 +117,16 @@ const server = http.createServer(async (req, res) => {
   try {
     const relative = localPath === "/" ? "index.html" : localPath.replace(/^\//, "");
     const target = path.resolve(root, "dist", relative);
-    if (!target.startsWith(path.resolve(root, "dist"))) throw new Error("Invalid asset path");
-    const data = await fs.readFile(target);
-    res.writeHead(200, { "Content-Type": mime[path.extname(target)] || "application/octet-stream", "Cache-Control": relative === "index.html" ? "no-cache" : "public, max-age=31536000, immutable" }); res.end(data);
+    if (!target.startsWith(path.resolve(root, "dist") + path.sep)) throw new Error("Invalid asset path");
+    let asset = target; let encoding = "";
+    for (const candidate of acceptedEncodings(req.headers["accept-encoding"])) {
+      const compressed = `${target}.${candidate === "gzip" ? "gz" : "br"}`;
+      try { if ((await fs.stat(compressed)).isFile()) { asset = compressed; encoding = candidate; break; } } catch { /* Older builds may not have compressed assets. */ }
+    }
+    const stat = await fs.stat(asset); if (!stat.isFile()) throw new Error("Not a file");
+    res.setHeader("Vary", "Accept-Encoding"); if (encoding) res.setHeader("Content-Encoding", encoding);
+    res.writeHead(200, { "Content-Type": mime[path.extname(target)] || "application/octet-stream", "Cache-Control": relative === "index.html" ? "no-cache" : "public, max-age=31536000, immutable", "Content-Length": stat.size });
+    const stream = createReadStream(asset); res.on("close", () => stream.destroy()); stream.on("error", () => res.destroy()).pipe(res);
   } catch {
     res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" });
     res.end("Not found");
@@ -116,5 +138,9 @@ server.listen(config.port, config.host, async () => {
   console.log(`HTTP Basic Auth: ${config.auth ? "enabled" : "disabled"}`);
   try { await controller.start(); } catch (error) { console.error("Codex app-server failed:", error); }
 });
-process.on("SIGTERM", () => { codex.stop(); server.close(); });
-process.on("SIGINT", () => { codex.stop(); server.close(); });
+server.requestTimeout = 120_000;
+server.headersTimeout = 15_000;
+let shuttingDown = false;
+const shutdown = async () => { if (shuttingDown) return; shuttingDown = true; server.close(); await controller.handle({ type: "runtime.stop" }); await vite?.close(); };
+process.on("SIGTERM", () => { void shutdown(); });
+process.on("SIGINT", () => { void shutdown(); });

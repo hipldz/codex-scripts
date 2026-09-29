@@ -7,8 +7,9 @@
     "node": "^20.19.0 || >=22.12.0"
   },
   "scripts": {
+    "test": "tsx --test tests/*.test.ts",
     "dev": "tsx server/index.ts --dev",
-    "build": "tsc --noEmit && vite build && tsc -p tsconfig.server.json",
+    "build": "tsc --noEmit && vite build && node scripts/compress.mjs && tsc -p tsconfig.server.json",
     "start": "node --max-old-space-size=256 dist-server/index.js"
   },
   "dependencies": {

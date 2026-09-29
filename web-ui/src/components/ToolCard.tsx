@@ -1,5 +1,5 @@
 import { BrainCircuit, CheckCircle2, ChevronRight, FilePenLine, FileText, LoaderCircle, Terminal, XCircle } from "lucide-react";
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import type { UiItem } from "../types";
 
 type ToolItem = Exclude<UiItem, { type: "user_message" | "assistant_message" | "generated_image" | "approval" | "error" | "status" }>;
@@ -12,7 +12,7 @@ function TypeIcon({ item }: { item: ToolItem }) {
   return <FileText />;
 }
 
-export function ToolCard({ item }: { item: ToolItem }) {
+export const ToolCard = memo(function ToolCard({ item }: { item: ToolItem }) {
   const live = (item.type === "thinking" || item.type === "command") && item.status === "running";
   const [open, setOpen] = useState(live);
   useEffect(() => { if (live) setOpen(true); }, [live]);
@@ -28,6 +28,6 @@ export function ToolCard({ item }: { item: ToolItem }) {
       <span className={`tool-state ${live ? "running" : failed ? "failed" : "done"}`}>{live ? <LoaderCircle /> : failed ? <XCircle /> : <CheckCircle2 />}</span>
       {detail && <ChevronRight className="tool-chevron" />}
     </button>
-    {open && detail && <pre className={item.type === "file_change" ? "diff" : "tool-output"}>{detail.split("\n").map((line, index) => <span key={index} className={line.startsWith("+") ? "added" : line.startsWith("-") ? "removed" : ""}>{line}{"\n"}</span>)}</pre>}
+    {open && detail && <pre className={item.type === "file_change" ? "diff" : "tool-output"}>{detail.slice(-65536).split("\n").slice(-1200).map((line, index) => <span key={index} className={line.startsWith("+") ? "added" : line.startsWith("-") ? "removed" : ""}>{line}{"\n"}</span>)}</pre>}
   </div>;
-}
+});
