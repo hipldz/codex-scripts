@@ -123,8 +123,8 @@ export function App() {
       activeRef.current = message.thread;
       finishSessionLoading();
       if (message.workspace) setMeta((old) => ({ ...old, ...message.workspace }));
-      setActive(message.thread); updateSessionUrl(message.thread.id); setItems(nextItems); setMessageHistory({ cursor: message.historyCursor || null, hasEarlier: Boolean(message.hasEarlier), loading: false }); setDiff(diffFromItems(nextItems)); setThreadUsage(null); setCompaction(message.compaction || null); setQueued(Boolean(message.queued)); setRunning(Boolean(message.queued || message.running || threadIsRunning(message.thread))); setTurnId(message.turnId);
-      const status = message.thread.status || (typeof message.running === "boolean" ? { type: message.running ? "active" : "idle" } : undefined);
+      setActive(message.thread); updateSessionUrl(message.thread.id); setItems(nextItems); setMessageHistory({ cursor: message.historyCursor || null, hasEarlier: Boolean(message.hasEarlier), loading: false }); setDiff(diffFromItems(nextItems)); setThreadUsage(null); setCompaction(message.compaction || null); setQueued(Boolean(message.queued)); setRunning(Boolean(message.queued || (typeof message.running === "boolean" ? message.running : threadIsRunning(message.thread)))); setTurnId(message.turnId);
+      const status = typeof message.running === "boolean" ? { type: message.running ? "active" : "idle" } : message.thread.status;
       setThreads((old) => old.map((thread) => thread.id === message.thread.id ? { ...thread, status } : thread));
       setArchivedThreads((old) => old.map((thread) => thread.id === message.thread.id ? { ...thread, status } : thread));
       if (message.model) setModel(message.model); if (message.effort) setEffort(message.effort);
@@ -134,14 +134,14 @@ export function App() {
     } else if (message.type === "thread.changed") setThreads((old) => [message.thread, ...old.filter((entry) => entry.id !== message.thread.id)]);
     else if (message.type === "thread.mutated") {
       setThreads((old) => old.filter((entry) => entry.id !== message.threadId)); setArchivedThreads((old) => old.filter((entry) => entry.id !== message.threadId));
-      if (activeRef.current?.id === message.threadId && message.action !== "unarchive") { setActive(null); updateSessionUrl(); setItems([]); setMessageHistory({ cursor: null, hasEarlier: false, loading: false }); setDiff(""); setThreadUsage(null); setCompaction(null); }
+      if (activeRef.current?.id === message.threadId && message.action !== "unarchive") { activeRef.current = null; setRunning(false); setQueued(false); setTurnId(undefined); setActive(null); updateSessionUrl(); setItems([]); setMessageHistory({ cursor: null, hasEarlier: false, loading: false }); setDiff(""); setThreadUsage(null); setCompaction(null); }
       sendRef.current({ type: "thread.list" }); sendRef.current({ type: "thread.list", archived: true });
     } else if (message.type === "items") { if (message.threadId === activeRef.current?.id) setItems((old) => mergeItems(old, message.items)); }
     else if (message.type === "event") {
       const nextStatus = message.threadStatus || (typeof message.running === "boolean" ? { type: message.running ? "active" : "idle" } : null);
       if (message.threadId && nextStatus) {
-        setThreads((old) => old.map((thread) => thread.id === message.threadId ? { ...thread, status: nextStatus } : thread));
-        setArchivedThreads((old) => old.map((thread) => thread.id === message.threadId ? { ...thread, status: nextStatus } : thread));
+        setThreads((old) => old.map((thread) => thread.id === message.threadId ? { ...thread, queued: false, status: nextStatus } : thread));
+        setArchivedThreads((old) => old.map((thread) => thread.id === message.threadId ? { ...thread, queued: false, status: nextStatus } : thread));
       }
       if (!message.threadId || message.threadId === activeRef.current?.id) {
         if (message.items) setItems((old) => mergeItems(old, message.items)); if (message.diff !== undefined) setDiff(message.diff); if (message.tokenUsage) setThreadUsage(message.tokenUsage); if (message.compaction) setCompaction(message.compaction);
@@ -153,15 +153,17 @@ export function App() {
         if (message.turnId && nextRunning !== false) setTurnId(message.turnId);
       }
     } else if (message.type === "turn.queued") {
+      setThreads((old) => old.map((thread) => thread.id === message.threadId ? { ...thread, queued: true } : thread));
       if (message.threadId === activeRef.current?.id) { setQueued(true); setRunning(true); setItems((old) => old.map((item) => item.id === message.messageId && item.type === "user_message" ? { ...item, delivery: "queued" } : item)); }
     } else if (message.type === "turn.failed") {
+      setThreads((old) => old.map((thread) => thread.id === message.threadId ? { ...thread, queued: false, status: { type: "idle" } } : thread));
       lastAttempt.current = null;
       if (message.threadId === activeRef.current?.id) { setQueued(false); setRunning(false); setTurnId(undefined); setItems((old) => old.map((item) => item.id === message.messageId && item.type === "user_message" ? { ...item, delivery: "failed", failure: message.message } : item)); }
     } else if (message.type === "turn.accepted") {
       outgoing.current.delete(message.messageId);
+      if (message.threadId) setThreads((old) => old.map((thread) => thread.id === message.threadId ? { ...thread, queued: false, status: { type: message.running === false ? "idle" : "active" } } : thread));
       if (message.threadId !== activeRef.current?.id) return;
       setQueued(false); setTurnId(message.running === false ? undefined : message.turnId); setRunning(message.running !== false);
-      if (message.threadId) setThreads((old) => old.map((thread) => thread.id === message.threadId ? { ...thread, status: { type: "active" } } : thread));
       if (message.messageId && Array.isArray(message.attachments)) setItems((old) => old.map((item) => {
         if (item.type !== "user_message" || item.id !== message.messageId) return item;
         return { ...item, delivery: "sent", turnId: message.turnId, attachments: message.attachments.map((attachment: any) => ({ ...attachment, data: undefined })) };
@@ -174,11 +176,12 @@ export function App() {
     else if (message.type === "fs.created") { pending.current.get(`create:${message.requestId}`)?.(message); pending.current.delete(`create:${message.requestId}`); }
     else if (message.type === "fs.deleted") { pending.current.get(`delete:${message.requestId}`)?.(message); pending.current.delete(`delete:${message.requestId}`); }
     else if (message.type === "workspace.entries") { pending.current.get(`workspace:${message.path}`)?.(message.entries); pending.current.delete(`workspace:${message.path}`); setMeta((old) => ({ ...old, workspaceBase: message.base, workspace: message.current })); }
-    else if (message.type === "workspace.selected") { const availableModels = modelsRef.current; const configured = availableModels.find((item) => item.model === message.defaultModel || item.id === message.defaultModel); const preferred = configured || availableModels.find((item) => item.isDefault); const nextModel = message.defaultModel || preferred?.model || ""; const nextEffort = message.defaultEffort || configured?.defaultReasoningEffort || preferred?.defaultReasoningEffort || ""; setDefaultModel(nextModel); setDefaultEffort(nextEffort); setModel(nextModel); setEffort(nextEffort); setMeta((old) => ({ ...old, ...message, workspaceSelected: true })); setWorkspacePicker(false); setActive(null); updateSessionUrl(); setItems([]); setMessageHistory({ cursor: null, hasEarlier: false, loading: false }); setDiff(""); setThreadUsage(null); setCompaction(null); }
+    else if (message.type === "workspace.selected") { const availableModels = modelsRef.current; const configured = availableModels.find((item) => item.model === message.defaultModel || item.id === message.defaultModel); const preferred = configured || availableModels.find((item) => item.isDefault); const nextModel = message.defaultModel || preferred?.model || ""; const nextEffort = message.defaultEffort || configured?.defaultReasoningEffort || preferred?.defaultReasoningEffort || ""; setDefaultModel(nextModel); setDefaultEffort(nextEffort); setModel(nextModel); setEffort(nextEffort); setMeta((old) => ({ ...old, ...message, workspaceSelected: true })); setWorkspacePicker(false); activeRef.current = null; setActive(null); setRunning(false); setQueued(false); setTurnId(undefined); updateSessionUrl(); setItems([]); setMessageHistory({ cursor: null, hasEarlier: false, loading: false }); setDiff(""); setThreadUsage(null); setCompaction(null); }
     else if (message.type === "system.usage") setResources(message.usage);
     else if (message.type === "account.usage") setAccount(message);
     else if (message.type === "error") {
       finishSessionLoading();
+      if (message.action === "runtime.restart" || message.action === "runtime.start") setBoot({ active: false, stage: "error", error: message.message });
       if (["turn.send", "thread.create"].includes(message.action)) {
         setRunning(false); setQueued(false); if (!message.transportError) lastAttempt.current = null;
         setItems((old) => old.map((item) => item.id === message.messageId && item.type === "user_message" ? { ...item, delivery: "failed", failure: message.message } : item));

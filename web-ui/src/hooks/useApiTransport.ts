@@ -42,7 +42,7 @@ export function useApiTransport(onMessage: (message: any) => void, disabled = fa
   useEffect(() => {
     mounted.current = true;
     if (disabled) return;
-    let live = true; let timer = 0; let polling = false; let failures = 0; let resync = false;
+    let live = true; let timer = 0; let polling = false; let failures = 0; let resync = false; let bootstrapped = false;
     const base = apiBase();
     const schedule = (delay: number, next = poll) => { window.clearTimeout(timer); if (live) timer = window.setTimeout(next, delay); };
     const bootstrap = async () => {
@@ -52,6 +52,8 @@ export function useApiTransport(onMessage: (message: any) => void, disabled = fa
         if (data.meta) deliver({ type: "status", ...data.meta, runtime: data.runtime, bootstrap: true });
         deliver({ type: "bootstrap.stage", stage: data.stage || "starting", error: data.error || data.runtime?.lastError || "" });
         if (data.ready) {
+          bootstrapped = true;
+          if (instance.current !== (data.eventInstance || "")) receipts.current.clear();
           cursor.current = data.eventCursor ?? 0; instance.current = data.eventInstance || "";
           runningThreads.current = new Set((data.threads || []).filter((thread: any) => thread.status?.type === "active").map((thread: any) => thread.id));
           deliver({ type: "models", models: data.models || [], defaultModel: data.defaultModel || "", defaultEffort: data.defaultEffort || "" });
@@ -76,7 +78,7 @@ export function useApiTransport(onMessage: (message: any) => void, disabled = fa
         const data = await request(`${base}/events?cursor=${cursor.current}&instance=${encodeURIComponent(instance.current)}`);
         if (!live) return;
         if (stamp === epoch.current) {
-          if (data.reset) { resync = true; polling = false; schedule(0, bootstrap); return; }
+          if (data.reset) { resync = true; bootstrapped = false; polling = false; schedule(0, bootstrap); return; }
           cursor.current = data.cursor ?? cursor.current; instance.current = data.instance || instance.current;
           for (const event of data.events || []) deliver(event.message);
           more = Boolean(data.more);
@@ -86,7 +88,7 @@ export function useApiTransport(onMessage: (message: any) => void, disabled = fa
       finally { polling = false; }
       schedule(failures ? Math.min(30_000, 1000 * 2 ** Math.min(failures, 5)) : more ? 0 : document.hidden ? 15_000 : runningThreads.current.size ? 650 : 2500);
     };
-    const visible = () => { if (!document.hidden) schedule(0); };
+    const visible = () => { if (!document.hidden) schedule(0, bootstrapped ? poll : bootstrap); };
     wake.current = visible; document.addEventListener("visibilitychange", visible); window.addEventListener("online", visible);
     void bootstrap();
     return () => { live = false; mounted.current = false; wake.current = () => {}; window.clearTimeout(timer); document.removeEventListener("visibilitychange", visible); window.removeEventListener("online", visible); for (const controller of requests.current) controller.abort(); };

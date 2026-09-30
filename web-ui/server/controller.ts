@@ -68,6 +68,8 @@ export class CodexController {
   private historyRequests = 0;
   private historyTail: Promise<unknown> = Promise.resolve();
   private fileRequests = 0;
+  private stateRevision = 0;
+  private stateRevisions = new Map<string, number>();
 
   constructor(private codex: CodexClient, private fs: WorkspaceFs, private attachments: AttachmentStore, private events: EventHub, private meta: () => any) {
     this.history = new HistoryReader(codex);
@@ -79,6 +81,10 @@ export class CodexController {
     });
     codex.on("message", (message) => {
       const threadId = message.params?.threadId;
+      if (threadId && ["turn/started", "turn/completed", "error", "thread/status/changed"].includes(message.method)) {
+        this.stateRevisions.delete(threadId); this.stateRevisions.set(threadId, ++this.stateRevision);
+        while (this.stateRevisions.size > 256) this.stateRevisions.delete(this.stateRevisions.keys().next().value!);
+      }
       if (threadId && message.method === "turn/started") { this.runningThreads.add(threadId); if (message.params?.turn?.id) this.activeTurns.set(threadId, message.params.turn.id); }
       if (threadId && (message.method === "turn/completed" || (message.method === "error" && !message.params?.willRetry))) { this.runningThreads.delete(threadId); this.activeTurns.delete(threadId); this.queue.completed(threadId); }
       if (threadId && message.method === "thread/status/changed") { if (message.params?.status?.type === "active") this.runningThreads.add(threadId); else { this.runningThreads.delete(threadId); this.activeTurns.delete(threadId); this.queue.pump(); } }
@@ -119,8 +125,10 @@ export class CodexController {
   }
 
   private async listThreads(archived: boolean, cursor: string | null) {
+    const since = this.stateRevision;
     const result = await this.codex.request("thread/list", { limit: 50, cursor, sortKey: "updated_at", sortDirection: "desc", archived, sourceKinds });
     for (const thread of result.data || []) {
+      if ((this.stateRevisions.get(thread.id) || 0) > since) { thread.status = { type: this.runningThreads.has(thread.id) ? "active" : "idle" }; continue; }
       if (thread.status?.type === "active") this.runningThreads.add(thread.id);
       else if (thread.status) { this.runningThreads.delete(thread.id); this.activeTurns.delete(thread.id); }
     }
@@ -168,8 +176,13 @@ export class CodexController {
     return { items: await this.threadItems(thread, page.entries), historyCursor: page.cursor, hasEarlier: Boolean(page.cursor), eventCursor };
   }
 
-  private async activate(result: any) {
+  private async activate(result: any, since: number) {
     const thread = result.thread; this.activeThreadId = thread.id;
+    if ((this.stateRevisions.get(thread.id) || 0) <= since) {
+      const turn = runningTurn(thread);
+      if (turn.running) this.runningThreads.add(thread.id); else { this.runningThreads.delete(thread.id); this.activeTurns.delete(thread.id); }
+      if (turn.turnId) this.activeTurns.set(thread.id, turn.turnId);
+    }
     let workspace: any;
     try {
       const scope = await this.fs.scoped(thread.cwd);
@@ -177,9 +190,6 @@ export class CodexController {
       if (thread.forkedFromId) this.attachments.bindThread(thread.forkedFromId, scope.path);
       workspace = this.workspaceMeta(scope);
     } catch (error) { workspace = { ...this.meta(), workspace: "", workspaceSelected: false, error: errorMessage(error) }; }
-    const turn = runningTurn(thread);
-    if (turn.running) this.runningThreads.add(thread.id); else { this.runningThreads.delete(thread.id); this.activeTurns.delete(thread.id); }
-    if (turn.turnId) this.activeTurns.set(thread.id, turn.turnId);
     const page = await this.threadPage(thread);
     const preview = await this.queue.preview(thread.id);
     const pending = [...this.pendingApprovals.values()].filter((entry) => entry.threadId === thread.id).map((entry) => entry.item);
@@ -239,12 +249,13 @@ export class CodexController {
         const thread = threadSummary(result.thread);
         return [{ type: "thread.active", thread, workspace: this.workspaceMeta(scope), items: [], historyCursor: null, hasEarlier: false, model: result.model, effort: result.reasoningEffort }, { type: "thread.changed", thread }];
       }
-      if (msg.type === "thread.resume") return [await this.activate(await this.codex.request("thread/resume", { threadId: msg.threadId, excludeTurns: true }))];
+      if (msg.type === "thread.resume") { const since = this.stateRevision; return [await this.activate(await this.codex.request("thread/resume", { threadId: msg.threadId, excludeTurns: true }), since)]; }
       if (msg.type === "thread.fork") {
         const lastTurnId = typeof msg.turnId === "string" ? msg.turnId.trim() : "";
         if (!lastTurnId) throw new Error("Choose a Codex response to branch from");
+        const since = this.stateRevision;
         const result = await this.codex.request("thread/fork", { threadId: msg.threadId, lastTurnId, excludeTurns: true });
-        return [await this.activate(result), { type: "thread.changed", thread: threadSummary(result.thread) }];
+        return [await this.activate(result, since), { type: "thread.changed", thread: threadSummary(result.thread) }];
       }
       if (msg.type === "thread.history") {
         const result = await this.codex.request("thread/read", { threadId: msg.threadId, includeTurns: false });
