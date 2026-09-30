@@ -79,13 +79,85 @@ http://127.0.0.1:8765/
 
 ## 会话权限
 
-Composer 工具栏会先读取当前 workspace 生效的 Codex 权限配置，并选择匹配的预设。若配置使用了命名权限方案、自定义 sandbox 规则或审批 reviewer，选择器提供“Use config.toml”，发送时保留 Codex 配置，不额外覆盖。手动选择其他预设后，该权限会用于新 session 和已有 session 的后续 turn：
+Codex 的会话权限是多个设置组合出来的，不是单一的“权限等级”：
 
-| 选项            | Codex 策略                       | 适用场景                                                     |
-| --------------- | -------------------------------- | ------------------------------------------------------------ |
-| Ask when needed | `workspace-write` + `on-request` | 默认选择；允许写入 workspace，需要时向浏览器请求确认         |
-| Full access     | `danger-full-access` + `never`   | 无 sandbox、无审批提示，适合可信环境的长时间 unattended 任务 |
-| Read-only       | `read-only` + `on-request`       | 仅检查、分析或审阅代码                                       |
+- `sandbox_mode` 限定命令可访问的文件和网络范围：`read-only`、`workspace-write` 或 `danger-full-access`。
+- `approval_policy` 决定哪些操作会暂停并进入审批：`on-request`、`never` 或按类别配置的 `granular`。
+- `approvals_reviewer` 决定由谁审核符合条件的审批请求：`user`（默认）或 `auto_review`。`auto_review` 只改变审核者，不扩大 sandbox，也不会审核 sandbox 内已经允许的操作。
+
+常用组合如下：
+
+| 行为 | `sandbox_mode` | `approval_policy` | `approvals_reviewer` | 效果 |
+| --- | --- | --- | --- | --- |
+| Ask for approval | `workspace-write` | `on-request` | `user` | 在 workspace 内读写和运行常规命令；需要越过 sandbox 边界时向用户请求审批。 |
+| Approve for me | `workspace-write` | `on-request` | `auto_review` | sandbox 边界与 Ask 相同；符合条件的审批请求交给自动 reviewer 审核。 |
+| Full access | `danger-full-access` | `never` | 通常不需要设置 | 不受 sandbox 限制，也不暂停等待审批。只用于可信环境。 |
+| 受限自动执行 | `workspace-write` | `never` | 不适用 | 在 workspace sandbox 范围内自动执行；需要越过边界时不会弹出审批，操作会被拒绝或失败。 |
+| Read-only | `read-only` | `on-request` | `user` | 默认只读；需要提升权限的操作可以请求用户审批。 |
+| Granular approval | 任意 sandbox | `granular` 对象 | `user` 或 `auto_review` | 分别决定不同类别的请求可否进入审批流程。 |
+
+`never` 控制是否等待审批，不会解除 sandbox 限制；因此 `workspace-write + never` 不是 Full access。相反，`danger-full-access + on-request` 虽然可以组合，但因为没有 workspace sandbox 边界，不能把它当成“所有危险操作都会先问我”。官方将 Full access 定义为 `danger-full-access + never`。[Sandbox 与审批说明](https://developers.openai.com/codex/sandboxing)
+
+如果只需要让 `workspace-write` 多写几个指定目录，可以用 `[sandbox_workspace_write].writable_roots` 扩展范围，并继续保留 sandbox；`network_access` 和临时目录选项也只调整该 sandbox 的边界，不会将它变成 Full access：
+
+```toml
+sandbox_mode = "workspace-write"
+
+[sandbox_workspace_write]
+writable_roots = ["/srv/shared"]
+network_access = false
+```
+
+### Ask for approval
+
+这是常见的本地开发模式：
+
+```toml
+sandbox_mode = "workspace-write"
+approval_policy = "on-request"
+approvals_reviewer = "user"
+```
+
+### Approve for me
+
+它与 Ask 使用相同 sandbox，只把符合条件的审批请求交给自动 reviewer；reviewer 可以审核并批准或拒绝请求，但不会扩大 sandbox 权限：
+
+```toml
+sandbox_mode = "workspace-write"
+approval_policy = "on-request"
+approvals_reviewer = "auto_review"
+```
+
+### 受限自动执行
+
+适合不需要交互审批、但仍要限制在 workspace 范围内的任务：
+
+```toml
+sandbox_mode = "workspace-write"
+approval_policy = "never"
+```
+
+### Read-only
+
+```toml
+sandbox_mode = "read-only"
+approval_policy = "on-request"
+approvals_reviewer = "user"
+```
+
+### Granular approval
+
+`granular` 可以逐类允许或拒绝审批提示。某字段为 `true` 时，该类请求可以进入审批流程；为 `false` 时会自动拒绝，而不是弹窗。字段包括 sandbox 提权、命令规则、MCP elicitation、权限申请和 Skill 脚本审批：
+
+```toml
+sandbox_mode = "workspace-write"
+approvals_reviewer = "user"
+approval_policy = { granular = { sandbox_approval = true, rules = true, mcp_elicitations = false, request_permissions = true, skill_approval = true } }
+```
+
+`approval_policy = "untrusted"` 已不再是可直接选择的策略，`on-failure` 已弃用；旧配置应改用受支持的策略。项目的 `trust_level = "untrusted"` 是另一项设置，仍可用于项目级信任管理。[Codex 配置参考](https://developers.openai.com/codex/config-reference/)
+
+Web UI 的权限菜单目前提供 **Ask when needed**、**Full access**、**Read-only** 和 **Use config.toml**，没有单独的 Approve for me 或 granular 按钮。页面会读取当前 workspace 的有效配置；命名权限方案、自动 reviewer、自定义 sandbox 规则、granular 策略或其他非标准组合应选择 **Use config.toml**，这样已有会话也会在发送下一条消息前应用配置。手动选择 Ask、Full 或 Read-only 时，则使用对应预设，并将 reviewer 设为 `user`。
 
 要让页面默认显示并使用 **Full access**，在运行 Web 服务的同一用户的 `$CODEX_HOME/config.toml` 中（未设置 `CODEX_HOME` 时是 `~/.codex/config.toml`）设置：
 
@@ -94,7 +166,7 @@ approval_policy = "never"
 sandbox_mode = "danger-full-access"
 ```
 
-重启 Web 服务并重新载入页面。配置生效后，权限菜单应显示 **Full access**。Codex 把 Full access 定义为这两个值的组合；若项目可信，也可以在 workspace 下的 `.codex/config.toml` 配置项目级默认。不要把 `default_permissions` 与 `sandbox_mode` 或 `[sandbox_workspace_write]` 同时配置；若使用命名权限方案，保留该方案并在页面选择“Use config.toml”。[Codex 配置参考](https://developers.openai.com/codex/config-reference/)
+重启 Web 服务并重新载入页面。配置生效后，权限菜单应显示 **Full access**。若项目可信，也可以在 workspace 下的 `.codex/config.toml` 配置项目级默认。不要把 `default_permissions` 与旧式 `sandbox_mode` 或 `[sandbox_workspace_write]` 混用；使用命名权限方案时保留该方案，并在页面选择 **Use config.toml**。[Codex 配置参考](https://developers.openai.com/codex/config-reference/)
 
 `Full access` 会允许 Codex 在当前运行账户的权限范围内执行命令。只应在本机、可信 workspace 和已理解任务影响时使用。
 

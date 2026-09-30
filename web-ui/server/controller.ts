@@ -34,7 +34,8 @@ const permissionDefaults = (config: any) => {
     else if (!profile && (sandbox === "workspace-write" || !sandbox) && (approval == null || approval === "on-request") && !customizedWorkspaceWrite) mode = "ask";
   }
   const labels = { ask: "Ask when needed", full: "Full access", "read-only": "Read-only", config: "Custom Codex config" };
-  const detail = profile || (customizedWorkspaceWrite ? "sandbox_workspace_write" : customizedReviewer ? `approvals_reviewer=${reviewer}` : [sandbox, approval].filter(Boolean).join(" + ") || "Codex defaults");
+  const approvalLabel = typeof approval === "string" ? approval : approval?.granular ? "granular" : "";
+  const detail = profile || (customizedWorkspaceWrite ? "sandbox_workspace_write" : customizedReviewer ? `approvals_reviewer=${reviewer}` : [sandbox, approvalLabel].filter(Boolean).join(" + ") || "Codex defaults");
   return { defaultPermission: mode, defaultPermissionLabel: `${labels[mode]}${mode === "config" ? ` (${detail})` : " (config.toml)"}` };
 };
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : String(error);
