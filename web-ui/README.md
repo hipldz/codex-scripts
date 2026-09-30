@@ -79,13 +79,22 @@ http://127.0.0.1:8765/
 
 ## 会话权限
 
-Composer 工具栏中的权限菜单会在创建 session 时设置权限，也会在已有 session 的下一次 turn 覆盖并延续该设置：
+Composer 工具栏会先读取当前 workspace 生效的 Codex 权限配置，并选择匹配的预设。若配置使用了命名权限方案、自定义 sandbox 规则或审批 reviewer，选择器提供“Use config.toml”，发送时保留 Codex 配置，不额外覆盖。手动选择其他预设后，该权限会用于新 session 和已有 session 的后续 turn：
 
 | 选项            | Codex 策略                       | 适用场景                                                     |
 | --------------- | -------------------------------- | ------------------------------------------------------------ |
 | Ask when needed | `workspace-write` + `on-request` | 默认选择；允许写入 workspace，需要时向浏览器请求确认         |
 | Full access     | `danger-full-access` + `never`   | 无 sandbox、无审批提示，适合可信环境的长时间 unattended 任务 |
 | Read-only       | `read-only` + `on-request`       | 仅检查、分析或审阅代码                                       |
+
+要让页面默认显示并使用 **Full access**，在运行 Web 服务的同一用户的 `$CODEX_HOME/config.toml` 中（未设置 `CODEX_HOME` 时是 `~/.codex/config.toml`）设置：
+
+```toml
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+```
+
+重启 Web 服务并重新载入页面。配置生效后，权限菜单应显示 **Full access**。Codex 把 Full access 定义为这两个值的组合；若项目可信，也可以在 workspace 下的 `.codex/config.toml` 配置项目级默认。不要把 `default_permissions` 与 `sandbox_mode` 或 `[sandbox_workspace_write]` 同时配置；若使用命名权限方案，保留该方案并在页面选择“Use config.toml”。[Codex 配置参考](https://developers.openai.com/codex/config-reference/)
 
 `Full access` 会允许 Codex 在当前运行账户的权限范围内执行命令。只应在本机、可信 workspace 和已理解任务影响时使用。
 
@@ -120,6 +129,28 @@ node --max-old-space-size=256 dist-server/index.js
 ```
 
 如果希望少一个 npm 父进程，也可以在 build 后直接运行上面的 Node 命令。
+
+### 2 核 2GB Linux 服务器
+
+准备一个专用 Linux 用户，并确保该用户安装了符合要求的 Node.js、已登录 `codex` CLI，且有权访问项目目录和 workspace。Codex 登录信息必须属于运行 Web 服务的同一个用户。以下命令假设当前终端已切换到 `codex` 用户。
+
+以下以项目位于 `/srv/codex-scripts/web-ui`、运行用户为 `codex` 为例：
+
+```bash
+cd /srv/codex-scripts/web-ui
+npm ci
+npm run build
+mkdir -p /home/codex/workspace
+
+export CODEX_WEB_HOST=127.0.0.1
+export CODEX_WEB_PORT=8765
+export CODEX_WEB_BASE_PATH=/codex
+export CODEX_WEB_DEFAULT_WORKSPACE=/home/codex/workspace
+export CODEX_WEB_AUTH='codex:替换为强密码'
+npm start
+```
+
+先以前台方式确认服务正常。Node 默认只监听本机回环地址，外部访问应经过 Nginx HTTPS 反向代理；Basic Auth 不加密连接，不能用明文 HTTP 暴露到公网。Nginx 配置见本 README 的 [Nginx](#nginx) 一节。反向代理路径需与 `CODEX_WEB_BASE_PATH` 一致。
 
 ## 后台运行
 
@@ -173,7 +204,74 @@ $env:CODEX_WEB_PORT = "8765"
 
 运行日志和 PID 保存在 `.run/`，该目录不会提交到 Git。`logs` 命令中的 `Ctrl+C` 只会退出日志查看，不会停止服务。
 
-后台脚本能跨终端关闭继续运行，但不会在机器重启后自动恢复。需要开机自动启动时，应使用 systemd、Windows Service 或任务计划程序。
+后台脚本能跨终端关闭继续运行，但不会在机器重启后自动恢复。需要开机自动启动时，可按下方 systemd 配置运行。
+
+Linux systemd 示例（把项目路径、Node 路径和账户名换成服务器实际值）：
+
+先创建 `/etc/codex-web.env`，并按 `command -v codex` 的结果调整 `PATH`，确保 systemd 能找到 Codex CLI：
+
+```ini
+CODEX_WEB_HOST=127.0.0.1
+CODEX_WEB_PORT=8765
+CODEX_WEB_BASE_PATH=/codex
+CODEX_WEB_DEFAULT_WORKSPACE=/home/codex/workspace
+CODEX_WEB_AUTH=codex:替换为强密码
+CODEX_HOME=/home/codex/.codex
+PATH=/home/codex/.local/bin:/usr/local/bin:/usr/bin:/bin
+```
+
+```bash
+sudo chown root:root /etc/codex-web.env
+sudo chmod 600 /etc/codex-web.env
+```
+
+创建 `/etc/systemd/system/codex-web.service`：
+
+```ini
+[Unit]
+Description=Codex Web
+After=network.target
+
+[Service]
+Type=simple
+User=codex
+Group=codex
+WorkingDirectory=/srv/codex-scripts/web-ui
+Environment=HOME=/home/codex
+EnvironmentFile=/etc/codex-web.env
+ExecStart=/usr/bin/node --max-old-space-size=256 /srv/codex-scripts/web-ui/dist-server/index.js
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+UMask=0077
+MemoryHigh=1400M
+MemoryMax=1650M
+CPUQuota=180%
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`MemoryHigh` 会在服务进程组接近 1.4GB 时施加回收压力，`MemoryMax` 将 Web UI、Codex app-server 及其子进程限制在 1.65GB，为 2GB 主机上的系统进程留出约 400MB。`MemoryHigh`、`MemoryMax` 和 `CPUQuota` 需要 Linux cgroup/systemd 支持；若启动时报不认识这些属性，可移除对应配置项。
+
+启用服务并查看日志：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now codex-web
+sudo systemctl status codex-web
+sudo journalctl -u codex-web -f
+```
+
+修改代码后重新构建并重启：
+
+```bash
+cd /srv/codex-scripts/web-ui
+npm run build
+sudo systemctl restart codex-web
+```
+
+systemd 和 `scripts/codex-web.sh` 不要同时管理同一个实例。
 
 ## Workspace 与环境变量
 
@@ -345,7 +443,7 @@ RSS 包含 V8 之外的 Buffer 和原生内存，因此可能高于当前 heap u
 
 ### 长期运行
 
-已有后台脚本适合手动管理；需要崩溃恢复、开机启动和进程组资源限制时，可参考 `scripts/codex-web.service.example` 配置 Linux 用户级 systemd 服务。示例中的路径和 Node 路径需按机器调整；不与后台脚本同时启动同一端口。
+已有后台脚本适合手动管理；需要崩溃恢复和开机启动时，使用上方的 systemd 配置。不要同时用后台脚本和 systemd 启动同一个端口。
 
 
 ## 验证

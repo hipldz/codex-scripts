@@ -10,8 +10,33 @@ import { TurnQueue } from "./turn-queue.js";
 import { processTreeMemory } from "./resources.js";
 
 const sourceKinds = ["cli", "vscode", "exec", "appServer", "subAgent", "subAgentReview", "subAgentCompact", "subAgentThreadSpawn", "subAgentOther", "unknown"];
-const threadPermissionSettings = (permission: unknown) => permission === "full" ? { approvalPolicy: "never", sandbox: "danger-full-access" } : permission === "read-only" ? { approvalPolicy: "on-request", sandbox: "read-only" } : { approvalPolicy: "on-request", sandbox: "workspace-write" };
-const turnPermissionSettings = (permission: unknown, cwd: string) => permission === "full" ? { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } } : permission === "read-only" ? { approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false } } : { approvalPolicy: "on-request", sandboxPolicy: { type: "workspaceWrite", writableRoots: [cwd], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false } };
+const threadPermissionSettings = (permission: unknown) => permission === "config" ? {} : permission === "full" ? { approvalPolicy: "never", approvalsReviewer: "user", sandbox: "danger-full-access" } : permission === "read-only" ? { approvalPolicy: "on-request", approvalsReviewer: "user", sandbox: "read-only" } : { approvalPolicy: "on-request", approvalsReviewer: "user", sandbox: "workspace-write" };
+const turnPermissionSettings = (permission: unknown, cwd: string) => permission === "config" ? {} : permission === "full" ? { approvalPolicy: "never", approvalsReviewer: "user", sandboxPolicy: { type: "dangerFullAccess" } } : permission === "read-only" ? { approvalPolicy: "on-request", approvalsReviewer: "user", sandboxPolicy: { type: "readOnly", networkAccess: false } } : { approvalPolicy: "on-request", approvalsReviewer: "user", sandboxPolicy: { type: "workspaceWrite", writableRoots: [cwd], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false } };
+const permissionDefaults = (config: any) => {
+  const profile = config?.default_permissions ?? config?.defaultPermissions;
+  const sandbox = config?.sandbox_mode ?? config?.sandboxMode;
+  const approval = config?.approval_policy ?? config?.approvalPolicy;
+  const reviewer = config?.approvals_reviewer ?? config?.approvalsReviewer;
+  const customizedReviewer = reviewer != null && reviewer !== "user";
+  const workspaceWrite = config?.sandbox_workspace_write ?? config?.sandboxWorkspaceWrite ?? {};
+  const roots = workspaceWrite.writable_roots ?? workspaceWrite.writableRoots;
+  const customizedWorkspaceWrite = (Array.isArray(roots) && roots.length > 0)
+    || (workspaceWrite.network_access ?? workspaceWrite.networkAccess) === true
+    || (workspaceWrite.exclude_tmpdir_env_var ?? workspaceWrite.excludeTmpdirEnvVar) === true
+    || (workspaceWrite.exclude_slash_tmp ?? workspaceWrite.excludeSlashTmp) === true;
+  let mode: "ask" | "full" | "read-only" | "config" = "config";
+  if (!customizedReviewer) {
+    if (profile === ":danger-full-access" && approval === "never") mode = "full";
+    else if (profile === ":read-only" && (approval == null || approval === "on-request")) mode = "read-only";
+    else if (profile === ":workspace" && (approval == null || approval === "on-request")) mode = "ask";
+    else if (!profile && sandbox === "danger-full-access" && approval === "never") mode = "full";
+    else if (!profile && sandbox === "read-only" && (approval == null || approval === "on-request")) mode = "read-only";
+    else if (!profile && (sandbox === "workspace-write" || !sandbox) && (approval == null || approval === "on-request") && !customizedWorkspaceWrite) mode = "ask";
+  }
+  const labels = { ask: "Ask when needed", full: "Full access", "read-only": "Read-only", config: "Custom Codex config" };
+  const detail = profile || (customizedWorkspaceWrite ? "sandbox_workspace_write" : customizedReviewer ? `approvals_reviewer=${reviewer}` : [sandbox, approval].filter(Boolean).join(" + ") || "Codex defaults");
+  return { defaultPermission: mode, defaultPermissionLabel: `${labels[mode]}${mode === "config" ? ` (${detail})` : " (config.toml)"}` };
+};
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : String(error);
 const WEB_UI_CONTEXT_PREFIX = "[Codex Web thread files]";
 const threadDirectory = (threadId: string) => `.files/${threadId}/`;
@@ -109,7 +134,7 @@ export class CodexController {
     const [modelResult, threadResult, defaults] = await Promise.all([
       this.models.length ? Promise.resolve({ data: this.models }) : this.codex.request("model/list", { limit: 50, includeHidden: false }),
       this.listThreads(false, null),
-      this.readModelDefaults(),
+      this.readModelDefaults(this.fs.isSelected ? this.fs.path : undefined),
     ]);
     this.models = modelResult.data || this.models;
     return { ready: true, stage: "ready", eventCursor, eventInstance: this.events.instance, runtime: this.runtime(), meta: { ...this.meta(), codexStatus: this.codex.status }, models: this.models, ...defaults, threads: (threadResult.data || []).map((thread: any) => ({ ...threadSummary(thread), queued: this.queue.status(thread.id)?.queued || false })), nextCursor: threadResult.nextCursor || null };
@@ -118,10 +143,29 @@ export class CodexController {
   private async readModelDefaults(cwd?: string) {
     try {
       const result = await this.codex.request("config/read", { includeLayers: false, ...(cwd ? { cwd } : {}) });
-      return { defaultModel: String(result?.config?.model || ""), defaultEffort: String(result?.config?.model_reasoning_effort || "") };
+      return { defaultModel: String(result?.config?.model || ""), defaultEffort: String(result?.config?.model_reasoning_effort || ""), ...permissionDefaults(result?.config) };
     } catch {
-      return { defaultModel: "", defaultEffort: "" };
+      return { defaultModel: "", defaultEffort: "", ...permissionDefaults(null) };
     }
+  }
+
+  private async applyConfiguredPermission(threadId: string, cwd: string) {
+    const result = await this.codex.request("config/read", { includeLayers: false, cwd });
+    const config = result?.config || {};
+    const profile = config.default_permissions ?? config.defaultPermissions;
+    const approvalPolicy = config.approval_policy ?? config.approvalPolicy ?? "on-request";
+    const approvalsReviewer = config.approvals_reviewer ?? config.approvalsReviewer ?? "user";
+    if (typeof profile === "string" && profile) {
+      await this.codex.request("thread/settings/update", { threadId, permissions: profile, approvalPolicy, approvalsReviewer });
+      return;
+    }
+    const mode = config.sandbox_mode ?? config.sandboxMode ?? "workspace-write";
+    const workspaceWrite = config.sandbox_workspace_write ?? config.sandboxWorkspaceWrite ?? {};
+    const roots = Array.isArray(workspaceWrite.writable_roots ?? workspaceWrite.writableRoots) ? (workspaceWrite.writable_roots ?? workspaceWrite.writableRoots) : [];
+    const sandboxPolicy = mode === "danger-full-access" ? { type: "dangerFullAccess" }
+      : mode === "read-only" ? { type: "readOnly", networkAccess: false }
+        : { type: "workspaceWrite", writableRoots: [cwd, ...roots], networkAccess: workspaceWrite.network_access ?? workspaceWrite.networkAccess ?? false, excludeTmpdirEnvVar: workspaceWrite.exclude_tmpdir_env_var ?? workspaceWrite.excludeTmpdirEnvVar ?? false, excludeSlashTmp: workspaceWrite.exclude_slash_tmp ?? workspaceWrite.excludeSlashTmp ?? false };
+    await this.codex.request("thread/settings/update", { threadId, approvalPolicy, approvalsReviewer, sandboxPolicy });
   }
 
   private async listThreads(archived: boolean, cursor: string | null) {
@@ -190,11 +234,11 @@ export class CodexController {
       if (thread.forkedFromId) this.attachments.bindThread(thread.forkedFromId, scope.path);
       workspace = this.workspaceMeta(scope);
     } catch (error) { workspace = { ...this.meta(), workspace: "", workspaceSelected: false, error: errorMessage(error) }; }
-    const page = await this.threadPage(thread);
+    const [page, defaults] = await Promise.all([this.threadPage(thread), this.readModelDefaults(thread.cwd)]);
     const preview = await this.queue.preview(thread.id);
     const pending = [...this.pendingApprovals.values()].filter((entry) => entry.threadId === thread.id).map((entry) => entry.item);
     this.busy = this.runningThreads.size > 0;
-    return { type: "thread.active", thread: threadSummary(thread), workspace, ...page, items: [...page.items, ...(preview && !page.items.some((item) => item.id === preview.id) ? [preview] : []), ...pending], running: this.runningThreads.has(thread.id), queued: this.queue.status(thread.id)?.queued || false, turnId: this.activeTurns.get(thread.id), model: result.model, effort: result.reasoningEffort, eventInstance: this.events.instance };
+    return { type: "thread.active", thread: threadSummary(thread), workspace, ...defaults, ...page, items: [...page.items, ...(preview && !page.items.some((item) => item.id === preview.id) ? [preview] : []), ...pending], running: this.runningThreads.has(thread.id), queued: this.queue.status(thread.id)?.queued || false, turnId: this.activeTurns.get(thread.id), model: result.model, effort: result.reasoningEffort, eventInstance: this.events.instance };
   }
 
   private async startTurn(msg: any, cancelled: () => boolean) {
@@ -202,6 +246,7 @@ export class CodexController {
     const cwd = this.attachments.workspaceFor(threadId);
     if (!cwd) throw new Error("Thread workspace is unavailable; reopen the session");
     if (cancelled()) throw new Error("Turn cancelled");
+    if (msg.permission === "config") await this.applyConfiguredPermission(threadId, cwd);
     const persisted = msg.attachments?.length ? await this.attachments.save(threadId, messageId, msg.text, msg.attachments) : null;
     let accepted = false;
     try {

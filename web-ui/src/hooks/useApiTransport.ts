@@ -56,7 +56,7 @@ export function useApiTransport(onMessage: (message: any) => void, disabled = fa
           if (instance.current !== (data.eventInstance || "")) receipts.current.clear();
           cursor.current = data.eventCursor ?? 0; instance.current = data.eventInstance || "";
           runningThreads.current = new Set((data.threads || []).filter((thread: any) => thread.status?.type === "active").map((thread: any) => thread.id));
-          deliver({ type: "models", models: data.models || [], defaultModel: data.defaultModel || "", defaultEffort: data.defaultEffort || "" });
+          deliver({ type: "models", models: data.models || [], defaultModel: data.defaultModel || "", defaultEffort: data.defaultEffort || "", defaultPermission: data.defaultPermission || "ask", defaultPermissionLabel: data.defaultPermissionLabel || "Ask when needed (Codex default)" });
           deliver({ type: "threads", threads: data.threads || [], nextCursor: data.nextCursor || null, archived: false });
           deliver({ type: "bootstrap.ready" });
           if (resync) { resync = false; deliver({ type: "events.reset" }); }
