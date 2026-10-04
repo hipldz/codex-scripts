@@ -68,12 +68,14 @@ export function Conversation({ items, threadId, running, queued = false, retry, 
   const segments = useMemo(() => groupItems(items.map((item) => item.type === "user_message" ? { ...item, text: visibleUserText(item.text) } : item)), [items]);
   const branchableItems = useMemo(() => {
     const result = new Set<string>(); const turns = new Set<string>();
+    // Finishing one reply does not finish the turn; hide all branch actions while busy.
+    if (running || queued) return result;
     for (let index = items.length - 1; index >= 0; index--) {
       const item = items[index];
       if ((item.type === "assistant_message" || item.type === "generated_image") && item.turnId && !turns.has(item.turnId)) { result.add(item.id); turns.add(item.turnId); }
     }
     return result;
-  }, [items]);
+  }, [items, running, queued]);
   const prefix = basePath === "/" ? "" : basePath;
   const fileScope = `&${new URLSearchParams(threadId ? { threadId } : { workspace })}`;
   const resolvedImage = (src: string) => {

@@ -36,6 +36,7 @@ const mergeItems = (current: UiItem[], incoming: UiItem[]) => {
 };
 const diffFromItems = (value: UiItem[]) => value.filter((item): item is Extract<UiItem, { type: "file_change" }> => item.type === "file_change" && Boolean(item.diff)).map((item) => /^(diff --git|--- )/m.test(item.diff || "") ? item.diff : `diff --git a/${item.path} b/${item.path}\n--- a/${item.path}\n+++ b/${item.path}\n${item.diff}`).join("\n");
 const displayAttachment = (item: ComposerAttachment) => ({ id: item.id, name: item.name, mime: item.mime, kind: item.kind, size: item.size, data: item.kind === "image" ? item.data : undefined });
+const mergeThreadSummary = (previous: Thread | null | undefined, incoming: Thread): Thread => ({ ...previous, ...incoming, preview: incoming.preview || previous?.preview || "" });
 const lastTurnIndex = (value: UiItem[], turnId: string) => { for (let index = value.length - 1; index >= 0; index--) if (value[index].turnId === turnId) return index; return -1; };
 const editDiff = (path: string, before: string, after: string) => {
   if (before.length + after.length > 512 * 1024) return `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n Large edit saved. Open the file to inspect its contents.`;
@@ -110,8 +111,15 @@ export function App() {
     else if (message.type === "bootstrap.ready") setBoot({ active: false, stage: "Ready", error: "" });
     else if (message.type === "bootstrap.error") setBoot({ active: false, stage: "Codex failed to start", error: message.message || "Unknown startup error" });
     else if (message.type === "threads") {
-      const merge = (old: Thread[]) => message.refresh ? [...message.threads, ...old.filter((entry) => !message.threads.some((next: Thread) => next.id === entry.id))] : message.append ? [...old, ...message.threads.filter((next: Thread) => !old.some((item) => item.id === next.id))] : message.threads;
+      const merge = (old: Thread[]) => {
+        const previous = new Map(old.map((thread) => [thread.id, thread]));
+        const incoming = message.threads.map((thread: Thread) => mergeThreadSummary(previous.get(thread.id), thread));
+        if (message.refresh) return [...incoming, ...old.filter((entry) => !incoming.some((next: Thread) => next.id === entry.id))];
+        if (message.append) return [...old, ...incoming.filter((next: Thread) => !previous.has(next.id))];
+        return incoming;
+      };
       const current = message.threads.find((thread: Thread) => thread.id === activeRef.current?.id);
+      if (current) setActive((old) => old?.id === current.id ? mergeThreadSummary(old, current) : old);
       if (current?.status && !submitting.current) { const isRunning = threadIsRunning(current); setRunning(isRunning); setQueued(Boolean(current.queued)); if (!isRunning) setTurnId(undefined); }
       if (message.archived) { setArchivedThreads(merge); setThreadCursors((old) => ({ ...old, archived: message.nextCursor || null })); }
       else { setThreads(merge); if (!message.refresh) setThreadCursors((old) => ({ ...old, recent: message.nextCursor || null })); }
@@ -121,26 +129,31 @@ export function App() {
       setDefaultModel(nextModel); setDefaultEffort(nextEffort); if (!activeRef.current) { setModel(nextModel); setEffort(nextEffort); }
       if (message.defaultPermission && !message.action) { setPermission(message.defaultPermission); setConfigPermissionLabel(message.defaultPermissionLabel || "Codex default"); }
     } else if (message.type === "thread.active") {
+      const thread = mergeThreadSummary(activeRef.current?.id === message.thread.id ? activeRef.current : undefined, message.thread);
       const nextItems = message.items || [];
-      activeRef.current = message.thread;
+      activeRef.current = thread;
       finishSessionLoading();
       if (message.workspace) setMeta((old) => ({ ...old, ...message.workspace }));
-      setActive(message.thread); updateSessionUrl(message.thread.id); setItems(nextItems); setMessageHistory({ cursor: message.historyCursor || null, hasEarlier: Boolean(message.hasEarlier), loading: false }); setDiff(diffFromItems(nextItems)); setThreadUsage(null); setCompaction(message.compaction || null); setQueued(Boolean(message.queued)); setRunning(Boolean(message.queued || (typeof message.running === "boolean" ? message.running : threadIsRunning(message.thread)))); setTurnId(message.turnId);
+      setActive(thread); updateSessionUrl(thread.id); setItems(nextItems); setMessageHistory({ cursor: message.historyCursor || null, hasEarlier: Boolean(message.hasEarlier), loading: false }); setDiff(diffFromItems(nextItems)); setThreadUsage(null); setCompaction(message.compaction || null); setQueued(Boolean(message.queued)); setRunning(Boolean(message.queued || (typeof message.running === "boolean" ? message.running : threadIsRunning(thread)))); setTurnId(message.turnId);
       if (message.defaultPermission) { setPermission(message.defaultPermission); setConfigPermissionLabel(message.defaultPermissionLabel || "Codex default"); }
       const status = typeof message.running === "boolean" ? { type: message.running ? "active" : "idle" } : message.thread.status;
-      setThreads((old) => old.map((thread) => thread.id === message.thread.id ? { ...thread, status } : thread));
-      setArchivedThreads((old) => old.map((thread) => thread.id === message.thread.id ? { ...thread, status } : thread));
+      setThreads((old) => old.map((entry) => entry.id === thread.id ? { ...mergeThreadSummary(entry, thread), status } : entry));
+      setArchivedThreads((old) => old.map((entry) => entry.id === thread.id ? { ...mergeThreadSummary(entry, thread), status } : entry));
       if (message.model) setModel(message.model); if (message.effort) setEffort(message.effort);
     } else if (message.type === "history.items" && message.threadId === activeRef.current?.id) {
       setItems((old) => [...message.items.filter((next: UiItem) => !old.some((item) => item.id === next.id)), ...old]);
       setMessageHistory({ cursor: message.historyCursor || null, hasEarlier: Boolean(message.hasEarlier), loading: false });
-    } else if (message.type === "thread.changed") setThreads((old) => [message.thread, ...old.filter((entry) => entry.id !== message.thread.id)]);
-    else if (message.type === "thread.mutated") {
+    } else if (message.type === "thread.changed") {
+      setThreads((old) => [mergeThreadSummary(old.find((entry) => entry.id === message.thread.id), message.thread), ...old.filter((entry) => entry.id !== message.thread.id)]);
+      setActive((old) => old?.id === message.thread.id ? mergeThreadSummary(old, message.thread) : old);
+    } else if (message.type === "thread.mutated") {
       setThreads((old) => old.filter((entry) => entry.id !== message.threadId)); setArchivedThreads((old) => old.filter((entry) => entry.id !== message.threadId));
       if (activeRef.current?.id === message.threadId && message.action !== "unarchive") { activeRef.current = null; setRunning(false); setQueued(false); setTurnId(undefined); setActive(null); updateSessionUrl(); setItems([]); setMessageHistory({ cursor: null, hasEarlier: false, loading: false }); setDiff(""); setThreadUsage(null); setCompaction(null); }
       sendRef.current({ type: "thread.list" }); sendRef.current({ type: "thread.list", archived: true });
     } else if (message.type === "items") { if (message.threadId === activeRef.current?.id) setItems((old) => mergeItems(old, message.items)); }
     else if (message.type === "event") {
+      // The running-only poll stops at turn completion, so fetch its final title now.
+      if (message.threadId && message.running === false) void sendRef.current({ type: "thread.list", refresh: true });
       const nextStatus = message.threadStatus || (typeof message.running === "boolean" ? { type: message.running ? "active" : "idle" } : null);
       if (message.threadId && nextStatus) {
         setThreads((old) => old.map((thread) => thread.id === message.threadId ? { ...thread, queued: false, status: nextStatus } : thread));
@@ -164,6 +177,7 @@ export function App() {
       if (message.threadId === activeRef.current?.id) { setQueued(false); setRunning(false); setTurnId(undefined); setItems((old) => old.map((item) => item.id === message.messageId && item.type === "user_message" ? { ...item, delivery: "failed", failure: message.message } : item)); }
     } else if (message.type === "turn.accepted") {
       outgoing.current.delete(message.messageId);
+      if (message.running === false) void sendRef.current({ type: "thread.list", refresh: true });
       if (message.threadId) setThreads((old) => old.map((thread) => thread.id === message.threadId ? { ...thread, queued: false, status: { type: message.running === false ? "idle" : "active" } } : thread));
       if (message.threadId !== activeRef.current?.id) return;
       setQueued(false); setTurnId(message.running === false ? undefined : message.turnId); setRunning(message.running !== false);
@@ -203,6 +217,7 @@ export function App() {
 
   const create = () => {
     if (submitting.current) return;
+    activeRef.current = null;
     setQueued(false);
     setDiff(""); setItems([]); setMessageHistory({ cursor: null, hasEarlier: false, loading: false }); setActive(null); updateSessionUrl(); setThreadUsage(null); setCompaction(null); setRunning(false); setModel(defaultModel); setEffort(defaultEffort);
     if (demo) { const thread = { id: `demo-${Date.now()}`, preview: "New thread", updatedAt: Date.now() / 1000 }; setThreads((old) => [thread, ...old]); setActive(thread); setItems([]); }
@@ -214,7 +229,7 @@ export function App() {
     setMessageHistory({ cursor: null, hasEarlier: false, loading: false }); send({ type: "thread.resume", threadId: id });
   };
   const branchFrom = (sourceTurnId: string) => {
-    if (!active || !sourceTurnId || running || sessionLoadingRef.current) return;
+    if (!active || !sourceTurnId || running || queued || sessionLoadingRef.current) return;
     if (demo) { const boundary = lastTurnIndex(items, sourceTurnId); const branchItems = boundary >= 0 ? items.slice(0, boundary + 1) : items; const thread: Thread = { ...active, id: `branch-${Date.now()}`, forkedFromId: active.id, createdAt: Date.now() / 1000, updatedAt: Date.now() / 1000 }; setThreads((old) => [thread, ...old]); setActive(thread); updateSessionUrl(thread.id); setItems(branchItems); return; }
     if (beginSessionLoading(`fork:${active.id}`, "Creating branch")) send({ type: "thread.fork", threadId: active.id, turnId: sourceTurnId });
   };
@@ -237,6 +252,15 @@ export function App() {
         if (!thread) { setRunning(false); return false; }
       }
       setRunning(true);
+      if (thread && !thread.name && (!thread.preview || thread.preview === "New thread")) {
+        const preview = (text.trim().replace(/\s+/g, " ") || attachments.map((item) => item.name).join(", ")).slice(0, 30);
+        if (preview) {
+          thread = { ...thread, preview };
+          activeRef.current = thread; setActive(thread);
+          const updated = thread;
+          setThreads((old) => old.map((entry) => entry.id === updated.id ? mergeThreadSummary(entry, updated) : entry));
+        }
+      }
       const signature = JSON.stringify([thread?.id, text, attachments.map((item) => item.id)]);
       const localId = lastAttempt.current?.signature === signature ? lastAttempt.current.id : crypto.randomUUID();
       lastAttempt.current = { signature, id: localId };
