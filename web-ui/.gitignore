@@ -1,8 +1,0 @@
-node_modules/
-dist/
-dist-server/
-artifacts/
-.run/
-.DS_Store
-*.log
-.env
